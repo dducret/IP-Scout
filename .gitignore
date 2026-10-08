@@ -1,0 +1,8 @@
+/target/
+/dist/
+/artifacts/
+*.csv
+!/assets/oui.csv
+!/assets/mam.csv
+!/assets/oui36.csv
+
