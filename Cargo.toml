@@ -1,6 +1,6 @@
 [package]
 name = "ip-scout"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A native Windows IPv4 network scanner"
@@ -41,6 +41,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 tokio = { version = "1", features = ["macros", "test-util"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 rcgen = "0.14"
+
+[build-dependencies]
+winresource = "0.1.34"
 
 [[example]]
 name = "gui_smoke"

@@ -31,6 +31,8 @@ pub struct ServiceBanner {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TlsCertificate {
     pub port: u16,
+    #[serde(default)]
+    pub server_name: String,
     pub common_name: String,
     pub subject: String,
     pub issuer: String,
@@ -42,15 +44,21 @@ pub struct TlsCertificate {
 
 impl TlsCertificate {
     pub fn summary(&self) -> String {
+        let sni = if self.server_name.is_empty() {
+            String::new()
+        } else {
+            format!(" | SNI: {}", self.server_name)
+        };
         format!(
-            "{}: {} | SAN: {} | issuer: {} | valid: {} to {} | serial: {} [identity unverified]",
+            "{}: {} | SAN: {} | issuer: {} | valid: {} to {} | serial: {}{} [identity unverified]",
             self.port,
             self.subject,
             self.names.join(", "),
             self.issuer,
             self.valid_from,
             self.valid_until,
-            self.serial
+            self.serial,
+            sni
         )
     }
 }
@@ -123,6 +131,21 @@ impl InventoryProber {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Vec<TlsCertificate> {
+        self.certificates_for_host((ip, None), scanned, open, web, timeout, cancel)
+            .await
+    }
+
+    pub async fn certificates_for_host(
+        &self,
+        target: (Ipv4Addr, Option<&str>),
+        scanned: &[u16],
+        open: &[u16],
+        web: &[WebService],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Vec<TlsCertificate> {
+        let (ip, hostname) = target;
+        let hostname = hostname.and_then(crate::metadata::probe_hostname);
         let scanned: HashSet<_> = scanned.iter().copied().collect();
         let open_set: HashSet<_> = open.iter().copied().collect();
         let mut chosen = HashSet::new();
@@ -141,10 +164,9 @@ impl InventoryProber {
         for service in web {
             if let Ok(url) = reqwest::Url::parse(&service.url)
                 && matches!(url.scheme(), "http" | "https")
-                && url
-                    .host_str()
-                    .and_then(|host| host.parse::<Ipv4Addr>().ok())
-                    == Some(ip)
+                && url.host_str().is_some_and(|host| {
+                    host.parse::<Ipv4Addr>().ok() == Some(ip) || hostname.as_deref() == Some(host)
+                })
                 && let Some(port) = url.port_or_known_default()
                 && !crate::metadata::non_web_port(port)
                 && chosen.insert(port)
@@ -156,25 +178,29 @@ impl InventoryProber {
         ports.truncate(16);
         let mut results = Vec::new();
         let work = async {
-            let mut pending = stream::iter(ports)
-                .map(|port| async move {
+            let endpoints = ports.into_iter().flat_map(|port| {
+                std::iter::once((port, None))
+                    .chain(hostname.as_deref().map(|name| (port, Some(name))))
+            });
+            let mut pending = stream::iter(endpoints)
+                .map(|(port, name)| async move {
                     let _slot = self.slots.acquire().await.ok()?;
-                    tokio::time::timeout(timeout, self.certificate(ip, port))
+                    tokio::time::timeout(timeout, self.certificate_for_host(ip, port, name))
                         .await
                         .ok()
                         .flatten()
                 })
-                .buffer_unordered(4);
+                .buffer_unordered(if hostname.is_some() { 8 } else { 4 });
             while let Some(result) = pending.next().await {
-                if let Some(result) = result {
-                    results.push(result);
+                if let Some(certificate) = result {
+                    results.push(certificate);
                 }
             }
         };
         let _ = cancel
             .run_until_cancelled(tokio::time::timeout(timeout.saturating_mul(4), work))
             .await;
-        results.sort_by_key(|certificate| certificate.port);
+        results.sort_by(|a, b| (a.port, &a.server_name).cmp(&(b.port, &b.server_name)));
         results
     }
 
@@ -196,6 +222,19 @@ impl InventoryProber {
     }
 
     async fn certificate(&self, ip: Ipv4Addr, port: u16) -> Option<TlsCertificate> {
+        self.certificate_for_host(ip, port, None).await
+    }
+
+    async fn certificate_for_host(
+        &self,
+        ip: Ipv4Addr,
+        port: u16,
+        hostname: Option<&str>,
+    ) -> Option<TlsCertificate> {
+        let server_name = match hostname {
+            Some(name) => ServerName::try_from(crate::metadata::probe_hostname(name)?).ok()?,
+            None => ServerName::IpAddress(ip.into()),
+        };
         let captured = Arc::new(Mutex::new(None));
         let provider = self.provider.clone();
         let verifier = CaptureCertificate {
@@ -215,9 +254,11 @@ impl InventoryProber {
         // Capture the public certificate and deliberately abort. Never accept an untrusted peer,
         // present a client certificate, or send application/authentication data.
         let _ = TlsConnector::from(Arc::new(config))
-            .connect(ServerName::IpAddress(ip.into()), socket)
+            .connect(server_name, socket)
             .await;
-        captured.lock().ok()?.take()
+        let mut certificate = captured.lock().ok()?.take()?;
+        certificate.server_name = hostname.unwrap_or_default().to_owned();
+        Some(certificate)
     }
 }
 
@@ -299,6 +340,7 @@ fn parse_certificate(bytes: &[u8], port: u16) -> Option<TlsCertificate> {
         }
     }
     Some(TlsCertificate {
+        server_name: String::new(),
         port,
         common_name: certificate
             .subject()
@@ -520,6 +562,85 @@ mod tests {
             assert!(result.is_none());
             drop(all_slots);
             assert_eq!(prober.slots.available_permits(), 32);
+        });
+    }
+
+    #[test]
+    fn certificate_inventory_retains_default_and_sni_selected_certificates() {
+        runtime().block_on(async {
+            fn config(name: &str) -> Arc<rustls::ServerConfig> {
+                let generated = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
+                Arc::new(
+                    rustls::ServerConfig::builder_with_provider(Arc::new(
+                        rustls::crypto::ring::default_provider(),
+                    ))
+                    .with_safe_default_protocol_versions()
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(
+                        vec![generated.cert.der().clone()],
+                        rustls::pki_types::PrivatePkcs8KeyDer::from(
+                            generated.signing_key.serialize_der(),
+                        )
+                        .into(),
+                    )
+                    .unwrap(),
+                )
+            }
+            let default = config("default.invalid");
+            let named = config("virtual.invalid");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let mut tasks = Vec::new();
+                for _ in 0..2 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let default = default.clone();
+                    let named = named.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let hello = tokio_rustls::LazyConfigAcceptor::new(
+                            rustls::server::Acceptor::default(),
+                            socket,
+                        )
+                        .await
+                        .unwrap();
+                        let config = match hello.client_hello().server_name() {
+                            Some("virtual.invalid") => named,
+                            None => default,
+                            other => panic!("unexpected SNI {other:?}"),
+                        };
+                        // Certificate inventory deliberately aborts before authentication.
+                        assert!(hello.into_stream(config).await.is_err());
+                    }));
+                }
+                for task in tasks {
+                    task.await.unwrap();
+                }
+            });
+            let results = InventoryProber::default()
+                .certificates_for_host(
+                    (Ipv4Addr::LOCALHOST, Some("virtual.invalid")),
+                    &TLS_PORTS,
+                    &[port],
+                    &[],
+                    Duration::from_secs(1),
+                    &CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(results.len(), 2);
+            assert!(
+                results
+                    .iter()
+                    .any(|cert| cert.server_name.is_empty() && cert.names == ["default.invalid"])
+            );
+            assert!(
+                results
+                    .iter()
+                    .any(|cert| cert.server_name == "virtual.invalid"
+                        && cert.names == ["virtual.invalid"]
+                        && cert.summary().contains("SNI: virtual.invalid"))
+            );
+            server.await.unwrap();
         });
     }
 

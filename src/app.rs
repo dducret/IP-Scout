@@ -156,6 +156,7 @@ impl CopyFeedback {
 }
 
 pub struct ScoutApp {
+    logo: egui::TextureHandle,
     settings: Settings,
     networks: Vec<LocalNetwork>,
     hosts: Vec<HostResult>,
@@ -284,6 +285,20 @@ impl ScoutApp {
                 .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
         });
         Self {
+            logo: {
+                let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../assets/ip-scout-logo.png"
+                ))
+                .expect("bundled IP Scout logo must be a valid PNG");
+                cc.egui_ctx.load_texture(
+                    "ip-scout-logo",
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [icon.width as usize, icon.height as usize],
+                        &icon.rgba,
+                    ),
+                    egui::TextureOptions::LINEAR,
+                )
+            },
             settings,
             networks,
             hosts: Vec::new(),
@@ -645,7 +660,7 @@ impl ScoutApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(icons::NETWORK).size(26.0).color(GREEN));
+                    ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(34.0, 34.0)));
                     ui.label(RichText::new("IP Scout").size(23.0).strong());
                     ui.label(RichText::new("NETWORK SCANNER").size(11.0).color(MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1677,9 +1692,9 @@ impl ScoutApp {
                             ui.label("Max workers");
                             ui.add(egui::DragValue::new(&mut self.settings.workers).range(1..=scanner::MAX_HOST_WORKERS));
                             ui.end_row();
-                            ui.label("Concurrency");
+                            ui.label("Scan adaptation");
                             ui.checkbox(&mut self.settings.adaptive_concurrency, "Adaptive")
-                                .on_hover_text("Ramps local workers up to the maximum; adjusts VPN TCP concurrency and pacing after replies, latency spikes and recovered lost replies.");
+                                .on_hover_text("Adjusts workers and VPN pacing. Learns per-host ICMP/TCP deadlines from latency and jitter: 50 ms minimum on LAN, 100 ms routed, up to 4× the initial timeout (maximum 5 seconds). Unmeasured hosts keep the initial timeout.");
                             ui.end_row();
                             ui.label("ICMP samples");
                             ui.add(egui::DragValue::new(&mut self.settings.icmp_samples).range(1..=10))
@@ -2057,6 +2072,7 @@ impl ScoutApp {
                         text: "SSH-2.0-OpenSSH_9.6".into(),
                     }];
                     host.extra.certificates = vec![ip_scout::inventory::TlsCertificate {
+                        server_name: String::new(),
                         port: 8080,
                         common_name: "lab-nas.local".into(),
                         subject: "CN=lab-nas.local".into(),

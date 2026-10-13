@@ -406,23 +406,6 @@ pub(super) fn enrich_host(
                 Vec::new()
             }
         };
-        let certificates = async {
-            if probe_extra && options.extra.certificates && web.is_none() {
-                prober
-                    .inventory
-                    .certificates(
-                        ip,
-                        &options.ports,
-                        open_ports,
-                        &[],
-                        Duration::from_millis(u64::from(options.timeout_ms.max(1))),
-                        cancel,
-                    )
-                    .await
-            } else {
-                Vec::new()
-            }
-        };
         let metadata = async {
             if probe_extra && (options.extra.netbios || web.is_some() || options.extra.llmnr) {
                 let timeout = Duration::from_millis(u64::from(options.timeout_ms.max(1)));
@@ -501,12 +484,9 @@ pub(super) fn enrich_host(
             cancel,
             |udp| publisher.udp(ip, udp),
         );
-        let (certificates, (udp, (identity, (ping, ((), banners))))) = join(
-            certificates,
-            join(
-                udp,
-                join(identity, join(measurements, join(metadata, banners))),
-            ),
+        let (udp, (identity, (ping, ((), banners)))) = join(
+            udp,
+            join(identity, join(measurements, join(metadata, banners))),
         )
         .await;
         result.extra.udp = udp;
@@ -514,10 +494,6 @@ pub(super) fn enrich_host(
             result.status = HostStatus::Alive;
         }
         result.extra.banners = banners;
-        result.extra.certificates = certificates;
-        if !result.extra.certificates.is_empty() {
-            result.status = HostStatus::Alive;
-        }
         if !result.extra.banners.is_empty() {
             result.status = HostStatus::Alive;
         }
@@ -537,34 +513,59 @@ pub(super) fn enrich_host(
         }
         identity
     });
-    if probe_extra && options.extra.certificates && web.is_some() && !cancel.is_cancelled() {
-        // Web detection supplies confirmed HTTPS custom ports; keep the primary rows visible
-        // while the certificate-only handshake runs afterward.
+    let identity_collected = initial_alive || result.status == HostStatus::Alive;
+    if initial_alive {
+        apply_identity(&mut result, identity);
+    } else if result.status == HostStatus::Alive && !cancel.is_cancelled() {
+        let identity = self::identity(ip, options, resolver, prober, cancel);
+        apply_identity(&mut result, identity);
+    }
+    let hostname = metadata::probe_hostname(&result.hostname).or_else(|| {
+        result
+            .extra
+            .bonjour
+            .iter()
+            .find_map(|service| metadata::probe_hostname(&service.hostname))
+    });
+    if probe_extra
+        && !cancel.is_cancelled()
+        && let (Some(web), Some(hostname)) = (web, hostname.as_deref())
+    {
         publisher.publish(result.clone());
-        result.extra.certificates = prober.runtime.block_on(prober.inventory.certificates(
-            ip,
+        let services = prober.runtime.block_on(web.probe_host_scanned(
+            (ip, hostname),
             &options.ports,
             &result.open_ports,
-            &result.extra.web,
             Duration::from_millis(u64::from(options.timeout_ms.max(1))),
             cancel,
         ));
+        if !services.is_empty() {
+            result.status = HostStatus::Alive;
+            result.extra.web.extend(services);
+            result.extra.web.sort_by(|a, b| a.url.cmp(&b.url));
+            result.extra.web.dedup_by(|a, b| a.url == b.url);
+        }
+    }
+    if probe_extra && options.extra.certificates && !cancel.is_cancelled() {
+        // Preserve primary results while collecting IP and hostname-specific certificates.
+        publisher.publish(result.clone());
+        result.extra.certificates =
+            prober
+                .runtime
+                .block_on(prober.inventory.certificates_for_host(
+                    (ip, hostname.as_deref()),
+                    &options.ports,
+                    &result.open_ports,
+                    &result.extra.web,
+                    Duration::from_millis(u64::from(options.timeout_ms.max(1))),
+                    cancel,
+                ));
         if !result.extra.certificates.is_empty() {
             result.status = HostStatus::Alive;
         }
     }
-    if cancel.is_cancelled() {
-        if initial_alive {
-            apply_identity(&mut result, identity);
-        }
-        return Some(result);
-    }
-    if result.status == HostStatus::Alive {
-        let identity = if initial_alive {
-            identity
-        } else {
-            self::identity(ip, options, resolver, prober, cancel)
-        };
+    if !identity_collected && result.status == HostStatus::Alive && !cancel.is_cancelled() {
+        let identity = self::identity(ip, options, resolver, prober, cancel);
         apply_identity(&mut result, identity);
     }
     Some(result)

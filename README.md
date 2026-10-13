@@ -5,13 +5,13 @@ and collecting device and service information.
 
 ## Download and run
 
-Download [IP Scout 0.13.0 for Windows x64](https://github.com/dducret/IP-Scout/releases/download/v0.13.0/IP-Scout-0.13.0-Windows-x64.zip),
-extract the ZIP, and run `IP-Scout-0.13.0/ip-scout.exe`.
+Download [IP Scout 0.14.0 for Windows x64](https://github.com/dducret/IP-Scout/releases/download/v0.14.0/IP-Scout-0.14.0-Windows-x64.zip),
+extract the ZIP, and run `IP-Scout-0.14.0/ip-scout.exe`.
 
 The application is portable and normally runs without administrator privileges.
 It requires no Java, .NET, or packet-capture driver. Release notes, source code,
 and a SHA-256 checksum are available on the
-[release page](https://github.com/dducret/IP-Scout/releases/tag/v0.13.0).
+[release page](https://github.com/dducret/IP-Scout/releases/tag/v0.14.0).
 
 ## Usage
 
@@ -37,6 +37,18 @@ Accepted targets:
 TCP and UDP port fields accept lists and ranges, such as `22,80,443,8000-8010`.
 Scan settings control timeouts, concurrency, local discovery, and HTTPS policy.
 Changes to scanning options apply to the next scan.
+
+With **Adaptive** enabled in Scan settings, ICMP and TCP deadlines learn each
+host's latency and jitter independently. Unmeasured hosts keep the configured
+initial timeout; shortening requires at least three replies. Learned deadlines
+are bounded at 50 ms on local networks or 100 ms on routed networks, and at up
+to four times the initial timeout, capped at five seconds. Confirmation probes
+keep a separate timing history. Turning Adaptive off uses fixed probe timeouts.
+
+When a usable hostname is discovered, web and TLS fetchers also check that name
+using HTTP Host and TLS SNI while connecting to the scanned IP. IP-based results
+are retained, and hostname-specific certificate results show the SNI name.
+The HTTPS verification setting applies to both kinds of web requests.
 
 ## Features
 
@@ -76,6 +88,12 @@ cargo run --release --locked
 ```
 
 To create a Windows x64 ZIP, run `.\scripts\package.ps1`. Output is saved in `dist/`.
+
+Windows builds embed `assets/ip-scout.ico` in the executable for Explorer and
+shortcut icons. After changing the source logo PNG, run
+`.\scripts\create-icon.ps1` to regenerate its 16–256 pixel icon variants before
+building. The icon file is included in the repository; ordinary builds need no
+image conversion step.
 
 ## License
 

@@ -8,7 +8,13 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_inner_size([1180.0, 760.0])
-                .with_min_inner_size([820.0, 540.0]),
+                .with_min_inner_size([820.0, 540.0])
+                .with_icon(
+                    eframe::icon_data::from_png_bytes(include_bytes!(
+                        "../assets/ip-scout-logo.png"
+                    ))
+                    .expect("bundled IP Scout logo must be a valid PNG"),
+                ),
             centered: true,
             ..Default::default()
         },

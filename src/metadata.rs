@@ -106,6 +106,55 @@ impl WebProber {
         self.probe_schemes(ip, port).await.into_iter().next()
     }
 
+    /// Use HTTP Host and TLS SNI without resolving or leaving the scanned address.
+    pub async fn probe_host_scanned(
+        &self,
+        target: (Ipv4Addr, &str),
+        scanned_ports: &[u16],
+        open_ports: &[u16],
+        timeout: Duration,
+        cancel: &CancellationToken,
+    ) -> Vec<WebService> {
+        let (ip, hostname) = target;
+        let Some(hostname) = probe_hostname(hostname) else {
+            return Vec::new();
+        };
+        let Ok(client) = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .timeout(timeout)
+            .pool_max_idle_per_host(0)
+            .danger_accept_invalid_certs(self.allow_unverified_tls)
+            .user_agent(concat!("IP-Scout/", env!("CARGO_PKG_VERSION")))
+            .resolve(&hostname, SocketAddr::from((ip, 0)))
+            .build()
+        else {
+            return Vec::new();
+        };
+        let mut services = Vec::new();
+        let work = async {
+            let endpoints = web_ports(scanned_ports, open_ports)
+                .into_iter()
+                .flat_map(|port| [(port, "http"), (port, "https")]);
+            let mut pending = stream::iter(endpoints)
+                .map(|(port, scheme)| {
+                    self.probe_url(&client, format!("{scheme}://{hostname}:{port}/"), scheme)
+                })
+                .buffer_unordered(8);
+            while let Some(service) = pending.next().await {
+                if let Some(service) = service {
+                    services.push(service);
+                }
+            }
+        };
+        let _ = cancel
+            .run_until_cancelled(tokio::time::timeout(timeout.saturating_mul(4), work))
+            .await;
+        services.sort_by(|a, b| a.url.cmp(&b.url));
+        services
+    }
+
     #[cfg(test)]
     async fn probe_schemes(&self, ip: Ipv4Addr, port: u16) -> Vec<WebService> {
         self.probe_endpoint(ip, port, Duration::from_secs(3), &CancellationToken::new())
@@ -139,16 +188,25 @@ impl WebProber {
     }
 
     async fn probe_scheme(&self, ip: Ipv4Addr, port: u16, scheme: &str) -> Option<WebService> {
-        let _slot = self.slots.acquire().await.ok()?;
         let url = format!("{scheme}://{ip}:{port}/");
+        self.probe_url(&self.client, url, scheme).await
+    }
+
+    async fn probe_url(
+        &self,
+        client: &reqwest::Client,
+        url: String,
+        scheme: &str,
+    ) -> Option<WebService> {
+        let _slot = self.slots.acquire().await.ok()?;
         let request = if self.titles {
-            self.client.get(&url)
+            client.get(&url)
         } else {
-            self.client.head(&url)
+            client.head(&url)
         };
         let response = match request.send().await {
             Ok(response) if matches!(response.status().as_u16(), 405 | 501) => {
-                self.client.get(&url).send().await.ok()
+                client.get(&url).send().await.ok()
             }
             Ok(response) => Some(response),
             Err(_) => None,
@@ -176,6 +234,35 @@ impl WebProber {
         }
         None
     }
+}
+
+/// Discovered names are untrusted. Accept only DNS labels, never URL syntax or IP literals.
+pub(crate) fn probe_hostname(input: &str) -> Option<String> {
+    let name = input.trim().trim_end_matches('.');
+    if name.is_empty()
+        || name.len() > 253
+        || name.parse::<std::net::IpAddr>().is_ok()
+        || !name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    let url = reqwest::Url::parse(&format!("http://{name}/")).ok()?;
+    // URL parsers also recognize abbreviated, integer and hexadecimal IPv4 forms.
+    // Those bypass hostname overrides, so reject names that normalize to an IP.
+    if url.host_str() != Some(name.as_str()) || url.host_str()?.parse::<std::net::IpAddr>().is_ok()
+    {
+        return None;
+    }
+    Some(name)
 }
 
 fn web_ports(scanned: &[u16], open: &[u16]) -> Vec<u16> {
@@ -372,6 +459,124 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn discovered_probe_names_reject_url_syntax_and_ip_literals() {
+        assert_eq!(probe_hostname(" NAS.Local. ").as_deref(), Some("nas.local"));
+        for name in [
+            "",
+            "192.0.2.1",
+            "::1",
+            "127.1",
+            "2130706433",
+            "0x7f000001",
+            "evil/path",
+            "user@host",
+            "host:443",
+            "*.local",
+            "a..local",
+            "-nas.local",
+            "nas.local\r\nHost: other",
+        ] {
+            assert!(probe_hostname(name).is_none(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn named_web_probes_pin_the_ip_and_send_host_and_sni() {
+        runtime().block_on(async {
+            use std::sync::Arc;
+            use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+            use tokio_rustls::{rustls, TlsAcceptor};
+            async fn respond(mut socket: impl AsyncRead + AsyncWrite + Unpin, port: u16) {
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut bytes = [0; 2048];
+                    let count = socket.read(&mut bytes).await.unwrap();
+                    assert!(count > 0 && request.len() < 8192);
+                    request.extend_from_slice(&bytes[..count]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with("get / http/1.1"));
+                assert!(request.contains(&format!("\r\nhost: virtual.invalid:{port}\r\n")));
+                let body = "<title>Virtual console</title>";
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            let generated = rcgen::generate_simple_self_signed(vec!["virtual.invalid".into()]).unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
+                .with_single_cert(vec![generated.cert.der().clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()).into()).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                let mut tasks = Vec::new();
+                for _ in 0..2 {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let config = config.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let mut prefix = [0];
+                        socket.peek(&mut prefix).await.unwrap();
+                        if prefix[0] == 0x16 {
+                            let tls = TlsAcceptor::from(Arc::new(config)).accept(socket).await.unwrap();
+                            assert_eq!(tls.get_ref().1.server_name(), Some("virtual.invalid"));
+                            respond(tls, port).await;
+                        } else { respond(socket, port).await; }
+                    }));
+                }
+                for task in tasks { task.await.unwrap(); }
+            });
+            let prober = WebProber::new_with_titles(Duration::from_secs(1), true, true).unwrap();
+            let services = prober.probe_host_scanned((Ipv4Addr::LOCALHOST, "Virtual.Invalid."), &[80,443,8000,8080,8443,8888], &[port], Duration::from_secs(1), &CancellationToken::new()).await;
+            assert_eq!(services.len(), 2);
+            assert!(services.iter().all(|service| service.title == "Virtual console" && service.url.contains("virtual.invalid")));
+            assert!(services.iter().any(|service| service.url.starts_with("https://") && service.tls_unverified));
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn named_web_probes_keep_strict_tls_and_do_not_follow_redirects() {
+        runtime().block_on(async {
+            use std::sync::Arc;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio_rustls::{rustls, TlsAcceptor};
+            let generated = rcgen::generate_simple_self_signed(vec!["virtual.invalid".into()]).unwrap();
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
+                .with_single_cert(vec![generated.cert.der().clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der()).into()).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(async move {
+                for _ in 0..2 {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut prefix = [0]; socket.peek(&mut prefix).await.unwrap();
+                    if prefix[0] == 0x16 {
+                        assert!(TlsAcceptor::from(Arc::new(config.clone())).accept(socket).await.is_err());
+                    } else {
+                        let mut bytes = [0; 2048];
+                        assert!(socket.read(&mut bytes).await.unwrap() > 0);
+                        socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://other.invalid/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    }
+                }
+            });
+            let prober = WebProber::new(Duration::from_secs(1), false).unwrap();
+            let services = prober.probe_host_scanned((Ipv4Addr::LOCALHOST, "virtual.invalid"), &[80,443,8000,8080,8443,8888], &[port], Duration::from_secs(1), &CancellationToken::new()).await;
+            assert_eq!(services.len(), 1);
+            assert_eq!(services[0].status, 302);
+            assert!(!services[0].tls_unverified);
+            server.await.unwrap();
+            let slots = prober.slots.acquire_many(32).await.unwrap();
+            let cancel = CancellationToken::new();
+            let stop = async { tokio::task::yield_now().await; cancel.cancel(); };
+            let (services, ()) = tokio::time::timeout(Duration::from_secs(1), futures_util::future::join(
+                prober.probe_host_scanned((Ipv4Addr::LOCALHOST, "virtual.invalid"), &[], &[port], Duration::from_secs(10), &cancel), stop
+            )).await.unwrap();
+            assert!(services.is_empty());
+            drop(slots);
+            assert_eq!(prober.slots.available_permits(), 32);
+        });
     }
 
     fn response(id: u16) -> Vec<u8> {

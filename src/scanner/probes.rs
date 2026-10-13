@@ -2,7 +2,7 @@ use super::{
     FAST_TCP_CONNECTIONS, MAX_HOST_WORKERS, MAX_TCP_CONNECTIONS, PORTS_PER_HOST, model::*,
 };
 use crate::{
-    adaptive::{AdaptiveConcurrency, Observation},
+    adaptive::{AdaptiveConcurrency, Observation, RttEstimator},
     inventory::InventoryProber,
     network,
     udp::UdpProber,
@@ -10,6 +10,7 @@ use crate::{
 use futures_util::{StreamExt, future::join, stream};
 use std::thread;
 use std::{
+    collections::HashMap,
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
@@ -218,6 +219,7 @@ pub(super) struct TcpProber {
     local_ranges: Vec<(u32, u32)>,
     pub(super) inventory: InventoryProber,
     pub(super) udp: UdpProber,
+    timings: Mutex<HashMap<(Ipv4Addr, bool, u32), RttEstimator>>,
 }
 
 impl TcpProber {
@@ -273,6 +275,7 @@ impl TcpProber {
             local_ranges,
             inventory: InventoryProber::default(),
             udp: UdpProber::default(),
+            timings: Mutex::new(HashMap::new()),
         })
     }
 
@@ -295,6 +298,39 @@ impl TcpProber {
             &self.routed_adaptive
         } else {
             &self.local_adaptive
+        }
+    }
+
+    fn deadline_ms(&self, ip: Ipv4Addr, echo: bool, configured_ms: u32) -> u32 {
+        if !self.adaptive_enabled {
+            return configured_ms.max(1);
+        }
+        self.timings
+            .lock()
+            .unwrap()
+            .get(&(ip, echo, configured_ms))
+            .map_or(configured_ms.max(1), |timing| {
+                timing.timeout_ms(configured_ms, !self.routed(ip))
+            })
+    }
+
+    fn record_timing(
+        &self,
+        ip: Ipv4Addr,
+        echo: bool,
+        configured_ms: u32,
+        deadline_ms: u32,
+        reply_ms: Option<f64>,
+    ) {
+        if !self.adaptive_enabled {
+            return;
+        }
+        let mut timings = self.timings.lock().unwrap();
+        let key = (ip, echo, configured_ms);
+        if let Some(reply_ms) = reply_ms {
+            timings.entry(key).or_default().reply(reply_ms);
+        } else if let Some(timing) = timings.get_mut(&key) {
+            timing.timed_out(deadline_ms);
         }
     }
 
@@ -358,9 +394,10 @@ impl TcpProber {
             None
         };
         let ping_cancel = cancel.clone();
+        let deadline_ms = self.deadline_ms(ip, true, timeout_ms);
         let ping = tokio::task::spawn_blocking(move || {
             collect_pings(samples, &ping_cancel, || {
-                network::ping_reply(ip, timeout_ms)
+                network::ping_reply(ip, deadline_ms)
             })
         })
         .await
@@ -368,6 +405,9 @@ impl TcpProber {
             error: Some(format!("ICMP worker failed: {error}")),
             ..Default::default()
         });
+        if !cancel.is_cancelled() && ping.error.is_none() && ping.sent > 0 {
+            self.record_timing(ip, true, timeout_ms, deadline_ms, ping.ping_ms);
+        }
         if self.routed(ip) && !cancel.is_cancelled() && ping.received > 0 {
             self.controller(ip).observe(Observation::Reply {
                 rtt_ms: ping.ping_ms,
@@ -396,7 +436,6 @@ impl TcpProber {
         cancel: &CancellationToken,
         progress: impl FnMut(&PortResult),
     ) -> Option<PortResult> {
-        let timeout = Duration::from_millis(u64::from(timeout_ms.max(1)));
         let routed = self.routed(ip);
         collect_port_probes_with_progress(
             ports,
@@ -435,21 +474,37 @@ impl TcpProber {
                     return Err(std::io::ErrorKind::Interrupted.into());
                 }
                 // Queueing for a rate/connection slot does not consume the network timeout.
+                let deadline_ms = self.deadline_ms(ip, false, timeout_ms);
+                let timeout = Duration::from_millis(u64::from(deadline_ms));
                 let started = Instant::now();
                 let outcome = tokio::time::timeout(
                     timeout,
                     tokio::net::TcpStream::connect(SocketAddr::new(IpAddr::V4(ip), port)),
                 )
                 .await
-                .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
+                .unwrap_or_else(|_| Err(std::io::ErrorKind::TimedOut.into()))
                 .map(|_| ());
-                if routed
-                    && (outcome.is_ok()
-                        || outcome.as_ref().is_err_and(|error| {
-                            error.kind() == std::io::ErrorKind::ConnectionRefused
-                        }))
-                    && !cancel.is_cancelled()
-                {
+                let replied = outcome.is_ok()
+                    || outcome
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused);
+                if !cancel.is_cancelled() {
+                    if replied {
+                        self.record_timing(
+                            ip,
+                            false,
+                            timeout_ms,
+                            deadline_ms,
+                            Some(started.elapsed().as_secs_f64() * 1000.0),
+                        );
+                    } else if outcome
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+                    {
+                        self.record_timing(ip, false, timeout_ms, deadline_ms, None);
+                    }
+                }
+                if routed && replied && !cancel.is_cancelled() {
                     self.routed_adaptive.observe(Observation::Reply {
                         rtt_ms: Some(started.elapsed().as_secs_f64() * 1000.0),
                         timeout_ms,
@@ -555,4 +610,61 @@ fn local_ranges(networks: &[network::LocalNetwork]) -> Vec<(u32, u32)> {
         Some((first, first | !mask))
     }));
     ranges
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+
+    #[test]
+    fn learned_deadlines_are_isolated_by_host_transport_and_confirmation_budget() {
+        let prober = TcpProber::with_options(ScanMode::Fast, 128, true).unwrap();
+        let ip = Ipv4Addr::LOCALHOST;
+        for _ in 0..5 {
+            prober.record_timing(ip, false, 200, 200, Some(4.0));
+        }
+        assert_eq!(prober.deadline_ms(ip, false, 200), 50);
+        assert_eq!(
+            prober.deadline_ms(Ipv4Addr::new(127, 0, 0, 2), false, 200),
+            200
+        );
+        assert_eq!(prober.deadline_ms(ip, true, 200), 200);
+        assert_eq!(prober.deadline_ms(ip, false, 1500), 1500);
+        prober.record_timing(ip, false, 200, 50, None);
+        assert_eq!(prober.deadline_ms(ip, false, 200), 100);
+        let fixed = TcpProber::with_options(ScanMode::Fast, 128, false).unwrap();
+        for _ in 0..5 {
+            fixed.record_timing(ip, false, 200, 200, Some(4.0));
+        }
+        assert_eq!(fixed.deadline_ms(ip, false, 200), 200);
+        assert!(fixed.timings.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn actual_tcp_replies_train_deadlines_and_cancellation_still_returns_partial_results() {
+        let prober = TcpProber::with_options(ScanMode::Fast, 128, true).unwrap();
+        prober.runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let cancel = CancellationToken::new();
+            for _ in 0..3 {
+                assert_eq!(
+                    prober
+                        .ports(Ipv4Addr::LOCALHOST, &[port], 500, &cancel)
+                        .await
+                        .unwrap()
+                        .open,
+                    [port]
+                );
+            }
+            assert!(prober.deadline_ms(Ipv4Addr::LOCALHOST, false, 500) < 500);
+            cancel.cancel();
+            assert!(
+                prober
+                    .ports(Ipv4Addr::LOCALHOST, &[port], 500, &cancel)
+                    .await
+                    .is_none()
+            );
+        });
+    }
 }

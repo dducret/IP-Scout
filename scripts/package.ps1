@@ -11,7 +11,11 @@ try {
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Copy-Item -LiteralPath 'target\x86_64-pc-windows-msvc\release\ip-scout.exe' -Destination $destination
     Copy-Item -LiteralPath 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md' -Destination $destination
-    Compress-Archive -LiteralPath $destination -DestinationPath "dist\IP-Scout-$version-Windows-x64.zip" -Force
+    $archive = "dist\IP-Scout-$version-Windows-x64.zip"
+    Compress-Archive -LiteralPath $destination -DestinationPath $archive -Force
+    $archiveHash = Get-FileHash -LiteralPath $archive -Algorithm SHA256
+    "$($archiveHash.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($archive))" |
+        Set-Content -LiteralPath "dist\IP-Scout-$version-SHA256SUMS.txt" -Encoding ascii
     Get-FileHash -LiteralPath "$destination\ip-scout.exe" -Algorithm SHA256
 }
 finally { Pop-Location }

@@ -5,6 +5,58 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+/// RTT learning is kept per host, transport and configured timeout by the caller.
+/// Silence from an unmeasured host is not evidence of congestion or latency.
+#[derive(Default)]
+pub(crate) struct RttEstimator {
+    samples: u32,
+    srtt_ms: f64,
+    variation_ms: f64,
+    backoff_ms: f64,
+}
+
+impl RttEstimator {
+    pub(crate) fn reply(&mut self, rtt_ms: f64) {
+        if !rtt_ms.is_finite() || rtt_ms < 0.0 {
+            return;
+        }
+        let rtt_ms = rtt_ms.max(1.0);
+        if self.samples == 0 {
+            self.srtt_ms = rtt_ms;
+            self.variation_ms = rtt_ms / 2.0;
+        } else {
+            self.variation_ms += ((rtt_ms - self.srtt_ms).abs() - self.variation_ms) / 4.0;
+            self.srtt_ms += (rtt_ms - self.srtt_ms) / 8.0;
+        }
+        self.samples = self.samples.saturating_add(1);
+        self.backoff_ms *= 0.9;
+    }
+
+    pub(crate) fn timed_out(&mut self, deadline_ms: u32) {
+        if self.samples > 0 {
+            // Concurrent expirations of the same deadline do not compound the backoff.
+            self.backoff_ms = self.backoff_ms.max(f64::from(deadline_ms) * 2.0);
+        }
+    }
+
+    pub(crate) fn timeout_ms(&self, initial_ms: u32, local: bool) -> u32 {
+        let initial_ms = initial_ms.max(1);
+        if self.samples == 0 {
+            return initial_ms;
+        }
+        let floor = initial_ms.min(if local { 50 } else { 100 });
+        let ceiling = initial_ms.saturating_mul(4).min(5000).max(initial_ms);
+        let learned = (self.srtt_ms + 4.0 * self.variation_ms).max(self.backoff_ms);
+        // Require several replies before shortening the user's initial deadline.
+        let learned = if self.samples < 3 {
+            learned.max(f64::from(initial_ms))
+        } else {
+            learned
+        };
+        learned.ceil().clamp(f64::from(floor), f64::from(ceiling)) as u32
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Observation {
     Reply {
@@ -177,6 +229,41 @@ impl AdaptiveConcurrency {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadlines_learn_latency_and_jitter_with_conservative_bounds() {
+        let mut timing = RttEstimator::default();
+        assert_eq!(timing.timeout_ms(200, true), 200);
+        timing.reply(5.0);
+        timing.reply(5.0);
+        assert_eq!(timing.timeout_ms(200, true), 200);
+        timing.reply(5.0);
+        assert_eq!(timing.timeout_ms(200, true), 50);
+        assert_eq!(timing.timeout_ms(200, false), 100);
+        timing.reply(180.0);
+        assert!(timing.timeout_ms(200, true) > 200);
+        timing.reply(10_000.0);
+        assert_eq!(timing.timeout_ms(200, false), 800);
+        assert_eq!(timing.timeout_ms(2000, false), 5000);
+    }
+
+    #[test]
+    fn silence_does_not_train_unknown_hosts_and_known_loss_backs_off() {
+        let mut timing = RttEstimator::default();
+        timing.timed_out(200);
+        assert_eq!(timing.timeout_ms(200, true), 200);
+        for _ in 0..8 {
+            timing.reply(5.0);
+        }
+        for _ in 0..16 {
+            timing.timed_out(50);
+        }
+        assert_eq!(timing.timeout_ms(200, true), 100);
+        timing.reply(f64::NAN);
+        assert_eq!(timing.timeout_ms(200, true), 100);
+        timing.reply(5.0);
+        assert_eq!(timing.timeout_ms(200, true), 90);
+    }
 
     fn healthy(controller: &AdaptiveConcurrency, now: Instant) {
         for _ in 0..8 {
