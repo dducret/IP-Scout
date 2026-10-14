@@ -5,13 +5,13 @@ and collecting device and service information.
 
 ## Download and run
 
-Download [IP Scout 0.14.0 for Windows x64](https://github.com/dducret/IP-Scout/releases/download/v0.14.0/IP-Scout-0.14.0-Windows-x64.zip),
-extract the ZIP, and run `IP-Scout-0.14.0/ip-scout.exe`.
+Download [IP Scout 0.15.0 for Windows x64](https://github.com/dducret/IP-Scout/releases/download/v0.15.0/IP-Scout-0.15.0-Windows-x64.zip),
+extract the ZIP, and run `IP-Scout-0.15.0/ip-scout.exe`.
 
 The application is portable and normally runs without administrator privileges.
 It requires no Java, .NET, or packet-capture driver. Release notes, source code,
 and a SHA-256 checksum are available on the
-[release page](https://github.com/dducret/IP-Scout/releases/tag/v0.14.0).
+[release page](https://github.com/dducret/IP-Scout/releases/tag/v0.15.0).
 
 ## Usage
 
@@ -33,6 +33,32 @@ Accepted targets:
 | Address range | `192.168.1.1-192.168.2.254` |
 | Short range | `192.168.1.1-254` |
 | CIDR subnet | `192.168.1.0/24` |
+| Multiple targets | `192.168.1.0/24, 10.0.0.5` |
+| Exclusions | `192.168.1.0/24 !192.168.1.20-30` |
+
+Use **Tools → Targets** to paste a multiline list or import a UTF-8 text/CSV
+file. CSV imports use an explicit IP/address/target column, so exported result
+files can be scanned again. Duplicates are merged; exclusions apply to scanning
+and discovery. The combined limit is 65,536 selected addresses after exclusions.
+Excluded CIDRs remove their whole subnet, including boundary addresses.
+
+Ctrl-click result rows to select several devices, then use **Scan selected**
+in Tools or the row context menu. **Scan visible results** respects the current
+filter; **Retry inconclusive** scans no-response or unfinished rows. These actions
+start a new scan of those addresses and replace the result table.
+
+**Tools → Profiles** saves named target, port, fetcher and scan settings between
+sessions. SNMP communities are excluded from saved profiles.
+
+**Tools → History** saves and reloads JSON scan snapshots, including actual target
+coverage, selected probes and completion status. Select a saved baseline or use
+the current results as the baseline, then compare the next scan. Differences
+include newly/lost responses, changed identities, observed ports and service
+information. Comparisons use common target/probe coverage; incomplete or changed
+discovery settings are reported as uncertain. A missing response does not prove
+that a device is offline or that a port is closed. Snapshot files are limited to
+128 MiB; import and comparison run in the background. SNMP communities are not
+recorded.
 
 TCP and UDP port fields accept lists and ranges, such as `22,80,443,8000-8010`.
 Scan settings control timeouts, concurrency, local discovery, and HTTPS policy.
@@ -50,6 +76,15 @@ using HTTP Host and TLS SNI while connecting to the scanned IP. IP-based results
 are retained, and hostname-specific certificate results show the SNI name.
 The HTTPS verification setting applies to both kinds of web requests.
 
+The **Service details** fetcher identifies SSH, FTP, SMTP, POP3, IMAP and VNC from
+greetings, and uses bounded read-only SMB2 negotiation, RTSP OPTIONS and Redis
+PING on their conventional ports. It also includes HTTP/HTTPS observations.
+Each record shows its protocol evidence and labels server product claims as
+unverified. It sends no authentication or generic printer/unknown-port payloads.
+**Network path** shows the Windows-selected interface, source IP and next hop.
+Routed TCP/ICMP pacing adapts separately by interface/next hop, while shared
+connection ceilings remain in effect.
+
 ## Features
 
 - ICMP ping, TCP port scanning, and local ARP discovery.
@@ -60,6 +95,8 @@ The HTTPS verification setting applies to both kinds of web requests.
 - HTTP/HTTPS detection, web page titles, service banners, TLS certificate details,
   and combined device identity information.
 - Configurable result columns, search, sorting, IP/MAC copying, and CSV export.
+- Target lists and exclusions, saved scan profiles, and rescanning selected results.
+- Scan history snapshots and comparisons, protocol service details, and network path information.
 
 ## Limits and result interpretation
 

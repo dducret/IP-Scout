@@ -1,4 +1,4 @@
-use crate::{network::LocalNetwork, targets::TargetRange};
+use crate::{network::LocalNetwork, targets::TargetScope};
 use futures_util::{StreamExt, stream};
 use mdns_sd::{DaemonEvent, IfKind, ResolvedService, ServiceDaemon, ServiceEvent};
 use quick_xml::{NsReader, events::Event, name::ResolveResult};
@@ -75,12 +75,11 @@ pub struct Snapshot {
     pub warnings: Vec<String>,
 }
 
-fn in_range(ip: Ipv4Addr, targets: &TargetRange) -> bool {
-    let ip = u32::from(ip);
-    (targets.first..=targets.last).contains(&ip)
+fn in_range(ip: Ipv4Addr, targets: &dyn TargetScope) -> bool {
+    targets.contains_ip(ip)
 }
 
-pub fn interfaces_for(networks: &[LocalNetwork], targets: &TargetRange) -> Vec<Ipv4Addr> {
+pub fn interfaces_for(networks: &[LocalNetwork], targets: &dyn TargetScope) -> Vec<Ipv4Addr> {
     let mut addresses = Vec::new();
     for network in networks {
         let Some((base, prefix)) = network.cidr.split_once('/') else {
@@ -99,7 +98,7 @@ pub fn interfaces_for(networks: &[LocalNetwork], targets: &TargetRange) -> Vec<I
         };
         let first = u32::from(base) & mask;
         let last = first | !mask;
-        if targets.first <= last && targets.last >= first && !addresses.contains(&network.address) {
+        if targets.overlaps_range(first, last) && !addresses.contains(&network.address) {
             addresses.push(network.address);
         }
     }
@@ -108,7 +107,7 @@ pub fn interfaces_for(networks: &[LocalNetwork], targets: &TargetRange) -> Vec<I
 }
 
 pub async fn collect(
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     interfaces: &[Ipv4Addr],
     bonjour: bool,
     wsd: bool,
@@ -161,7 +160,7 @@ impl Drop for MdnsGuard {
     }
 }
 
-fn add_bonjour(snapshot: &mut Snapshot, service: &ResolvedService, targets: &TargetRange) {
+fn add_bonjour(snapshot: &mut Snapshot, service: &ResolvedService, targets: &dyn TargetScope) {
     let hostname = clean(service.get_hostname().trim_end_matches('.'), 256);
     let instance = service
         .get_fullname()
@@ -217,7 +216,7 @@ fn add_bonjour(snapshot: &mut Snapshot, service: &ResolvedService, targets: &Tar
 }
 
 async fn collect_bonjour(
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     interfaces: &[Ipv4Addr],
     budget: Duration,
     cancel: &CancellationToken,
@@ -233,7 +232,7 @@ async fn collect_bonjour(
 
 async fn collect_bonjour_on(
     daemon: ServiceDaemon,
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     interfaces: &[Ipv4Addr],
     budget: Duration,
     cancel: &CancellationToken,
@@ -573,7 +572,7 @@ fn probes() -> Vec<(String, String)> {
 
 async fn wsd_on_interface(
     ip: Ipv4Addr,
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     budget: Duration,
     cancel: &CancellationToken,
 ) -> Snapshot {
@@ -619,7 +618,7 @@ async fn wsd_on_interface(
 
 async fn receive_wsd(
     socket: &tokio::net::UdpSocket,
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     ids: &[String],
     snapshot: &mut Snapshot,
 ) {
@@ -650,7 +649,7 @@ async fn receive_wsd(
 }
 
 async fn collect_wsd(
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     interfaces: &[Ipv4Addr],
     budget: Duration,
     cancel: &CancellationToken,
@@ -681,6 +680,42 @@ async fn collect_wsd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::targets::{TargetRange, TargetSet};
+
+    #[test]
+    fn noncontiguous_targets_filter_bonjour_and_select_interfaces_without_gap_networks() {
+        let service = mdns_sd::ServiceInfo::new(
+            "_http._tcp.local.",
+            "Excluded peer test",
+            "test.local.",
+            "192.0.2.4,192.0.2.5,172.16.0.1",
+            80,
+            &[("model", "Test service")][..],
+        )
+        .unwrap()
+        .as_resolved_service();
+        let targets = TargetSet::parse("10.0.0.1,192.0.2.1-10,!192.0.2.5").unwrap();
+        let mut snapshot = Snapshot::default();
+        add_bonjour(&mut snapshot, &service, &targets);
+        assert_eq!(snapshot.hosts.len(), 1);
+        assert!(snapshot.hosts.contains_key(&"192.0.2.4".parse().unwrap()));
+        let networks = ["10.0.0", "172.16.0", "192.0.2"].map(|prefix| LocalNetwork {
+            address: format!("{prefix}.100").parse().unwrap(),
+            cidr: format!("{prefix}.0/24"),
+        });
+        assert_eq!(
+            interfaces_for(&networks, &targets),
+            [
+                "10.0.0.100".parse::<Ipv4Addr>().unwrap(),
+                "192.0.2.100".parse().unwrap()
+            ]
+        );
+        let excluded_subnet = TargetSet::parse("10.0.0.1,192.0.2.0/24,!192.0.2.0/24").unwrap();
+        assert_eq!(
+            interfaces_for(&networks, &excluded_subnet),
+            ["10.0.0.100".parse::<Ipv4Addr>().unwrap()]
+        );
+    }
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()

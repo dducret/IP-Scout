@@ -1,7 +1,9 @@
+use crate::targets::TargetSet;
 use crate::{advertisements, discovery, metadata::WebProber};
 use futures_util::future::join;
+#[cfg(test)]
+use std::net::Ipv4Addr;
 use std::{
-    net::Ipv4Addr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver},
@@ -18,6 +20,7 @@ mod identity;
 mod model;
 mod pipeline;
 mod probes;
+mod routes;
 
 use host::{confirm_host, enrich_host, scan_host_with_progress};
 #[cfg(test)]
@@ -58,7 +61,8 @@ impl Drop for ScanHandle {
 }
 
 pub fn start_scan(options: ScanOptions) -> ScanHandle {
-    start_scan_inner(options, None)
+    let targets = TargetSet::from_range(options.targets.clone());
+    start_scan_inner(options, targets, None)
 }
 
 /// Wake an event consumer from background scan/delivery threads. Host wakes are coalesced.
@@ -67,12 +71,26 @@ pub fn start_scan_with_notifier(
     options: ScanOptions,
     notify: impl Fn() + Send + Sync + 'static,
 ) -> ScanHandle {
-    start_scan_inner(options, Some(std::sync::Arc::new(notify)))
+    let targets = TargetSet::from_range(options.targets.clone());
+    start_scan_inner(options, targets, Some(std::sync::Arc::new(notify)))
+}
+
+pub fn start_scan_targets_with_notifier(
+    mut options: ScanOptions,
+    targets: TargetSet,
+    notify: impl Fn() + Send + Sync + 'static,
+) -> ScanHandle {
+    options.targets = targets.bounds();
+    start_scan_inner(options, targets, Some(std::sync::Arc::new(notify)))
 }
 
 type Notifier = std::sync::Arc<dyn Fn() + Send + Sync>;
 
-fn start_scan_inner(options: ScanOptions, notify: Option<Notifier>) -> ScanHandle {
+fn start_scan_inner(
+    options: ScanOptions,
+    targets: TargetSet,
+    notify: Option<Notifier>,
+) -> ScanHandle {
     let (sender, events) = mpsc::sync_channel(256);
     let cancel = CancellationToken::new();
     let stopped = cancel.clone();
@@ -135,13 +153,13 @@ fn start_scan_inner(options: ScanOptions, notify: Option<Notifier>) -> ScanHandl
             if options.extra.bonjour || options.extra.wsd || options.extra.advertisements.enabled()
             {
                 scope.spawn(|| {
-                    let interfaces = discovery::interfaces_for(&prober.networks, &options.targets);
+                    let interfaces = discovery::interfaces_for(&prober.networks, &targets);
                     let window = Duration::from_secs(u64::from(
                         options.extra.discovery_seconds.clamp(1, 120),
                     ));
                     let (mut local, ads) = prober.runtime.block_on(join(
                         discovery::collect(
-                            &options.targets,
+                            &targets,
                             &interfaces,
                             options.extra.bonjour,
                             options.extra.wsd,
@@ -149,7 +167,7 @@ fn start_scan_inner(options: ScanOptions, notify: Option<Notifier>) -> ScanHandl
                             &stopped,
                         ),
                         advertisements::collect(
-                            &options.targets,
+                            &targets,
                             &interfaces,
                             options.extra.advertisements,
                             window,
@@ -195,12 +213,12 @@ fn start_scan_inner(options: ScanOptions, notify: Option<Notifier>) -> ScanHandl
                 });
             }
             if !run_host_pipeline(
-                options.targets.len(),
+                targets.len(),
                 prober.host_workers(&options),
                 &stopped,
                 |index| {
                     let host = scan_host_with_progress(
-                        Ipv4Addr::from(options.targets.first + index as u32),
+                        targets.ip_at(index)?,
                         &options,
                         &prober,
                         &stopped,

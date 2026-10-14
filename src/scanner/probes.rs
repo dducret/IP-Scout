@@ -1,5 +1,6 @@
 use super::{
     FAST_TCP_CONNECTIONS, MAX_HOST_WORKERS, MAX_TCP_CONNECTIONS, PORTS_PER_HOST, model::*,
+    routes::RouteBudgets,
 };
 use crate::{
     adaptive::{AdaptiveConcurrency, Observation, RttEstimator},
@@ -14,7 +15,7 @@ use std::{
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{
-        Mutex,
+        Arc, Mutex,
         mpsc::{self, SyncSender},
     },
     time::{Duration, Instant},
@@ -180,6 +181,14 @@ where
                 })
                 .buffer_unordered(parallelism.max(1));
             while let Some((port, outcome)) = pending.next().await {
+                // Cancelled queue/pacing waits never reached the network. They
+                // must not increase coverage or turn unchecked ports into silence.
+                if outcome
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted)
+                {
+                    continue;
+                }
                 result.checked += 1;
                 match outcome {
                     Ok(()) => result.open.push(port),
@@ -208,9 +217,8 @@ pub(super) struct TcpProber {
     pub(super) connections: tokio::sync::Semaphore,
     pub(super) routed_connections: tokio::sync::Semaphore,
     pub(super) routed_icmp: tokio::sync::Semaphore,
-    pub(super) routed_pacer: ProbePacer,
-    pub(super) local_adaptive: AdaptiveConcurrency,
-    pub(super) routed_adaptive: AdaptiveConcurrency,
+    pub(super) local_adaptive: Arc<AdaptiveConcurrency>,
+    pub(super) paths: RouteBudgets,
     pub(super) adaptive_enabled: bool,
     pub(super) max_workers: usize,
     pub(super) routed_max: usize,
@@ -219,6 +227,7 @@ pub(super) struct TcpProber {
     local_ranges: Vec<(u32, u32)>,
     pub(super) inventory: InventoryProber,
     pub(super) udp: UdpProber,
+    pub(super) services: crate::services::ServiceProber,
     timings: Mutex<HashMap<(Ipv4Addr, bool, u32), RttEstimator>>,
 }
 
@@ -261,12 +270,13 @@ impl TcpProber {
                 32
             }),
             routed_icmp: tokio::sync::Semaphore::new(32),
-            routed_pacer: ProbePacer::new(
-                Duration::from_millis(if mode == ScanMode::Fast { 16 } else { 32 }),
-                8,
+            local_adaptive: Arc::new(AdaptiveConcurrency::new(true, fast, max_workers, adaptive)),
+            paths: RouteBudgets::new(
+                fast,
+                adaptive,
+                routed_max,
+                Arc::new(AdaptiveConcurrency::new(false, fast, routed_max, adaptive)),
             ),
-            local_adaptive: AdaptiveConcurrency::new(true, fast, max_workers, adaptive),
-            routed_adaptive: AdaptiveConcurrency::new(false, fast, routed_max, adaptive),
             adaptive_enabled: adaptive,
             max_workers,
             routed_max,
@@ -275,6 +285,7 @@ impl TcpProber {
             local_ranges,
             inventory: InventoryProber::default(),
             udp: UdpProber::default(),
+            services: crate::services::ServiceProber::default(),
             timings: Mutex::new(HashMap::new()),
         })
     }
@@ -293,11 +304,11 @@ impl TcpProber {
         self.networks = networks;
     }
 
-    pub(super) fn controller(&self, ip: Ipv4Addr) -> &AdaptiveConcurrency {
+    pub(super) fn controller(&self, ip: Ipv4Addr) -> Arc<AdaptiveConcurrency> {
         if self.routed(ip) {
-            &self.routed_adaptive
+            self.paths.for_ip(ip).controller.clone()
         } else {
-            &self.local_adaptive
+            self.local_adaptive.clone()
         }
     }
 
@@ -352,13 +363,14 @@ impl TcpProber {
         if !self.adaptive_enabled || cancel.is_cancelled() {
             return;
         }
-        let (routed_tcp, interval) = self.routed_adaptive.snapshot();
+        let (routed_tcp, interval, active_paths) = self.paths.snapshot();
         let snapshot = ConcurrencySnapshot {
             local_workers: self.local_adaptive.snapshot().0,
             max_workers: self.max_workers,
             routed_tcp,
             routed_tcp_max: self.routed_max,
-            routed_interval_ms: interval.as_millis() as u64,
+            routed_interval_ms: interval,
+            active_paths,
         };
         let mut last = self.concurrency_report.lock().unwrap();
         if force || last.0 != Some(snapshot) && last.1.elapsed() >= Duration::from_millis(250) {
@@ -377,18 +389,15 @@ impl TcpProber {
         samples: u8,
         cancel: &CancellationToken,
     ) -> PingResult {
+        let path = if self.routed(ip) {
+            self.paths.for_ip(ip)
+        } else {
+            self.paths.fallback()
+        };
         let _permit = if self.routed(ip) {
-            let Some(Ok(permit)) = cancel.run_until_cancelled(self.routed_icmp.acquire()).await
-            else {
+            let Some(permit) = self.routed_echo_slot(&path, cancel).await else {
                 return PingResult::default();
             };
-            if !self
-                .routed_pacer
-                .wait_with_interval(cancel, || self.routed_adaptive.snapshot().1)
-                .await
-            {
-                return PingResult::default();
-            }
             Some(permit)
         } else {
             None
@@ -442,37 +451,34 @@ impl TcpProber {
             PORTS_PER_HOST,
             cancel,
             |port| async move {
+                let path = if routed {
+                    self.paths.for_ip(ip)
+                } else {
+                    self.paths.fallback()
+                };
                 let _adaptive = if routed {
-                    let Some(permit) = self.routed_adaptive.acquire(cancel).await else {
+                    let Some(permit) = path.controller.acquire(cancel).await else {
                         return Err(std::io::ErrorKind::Interrupted.into());
                     };
                     Some(permit)
                 } else {
                     None
                 };
-                let _routed = if routed {
-                    let permit = self
-                        .routed_connections
-                        .acquire()
+                let (_routed, _permit) = if routed {
+                    let (routed, connection) = self
+                        .routed_slots(&path, cancel)
                         .await
-                        .map_err(std::io::Error::other)?;
-                    Some(permit)
+                        .ok_or(std::io::ErrorKind::Interrupted)?;
+                    (Some(routed), connection)
                 } else {
-                    None
+                    (
+                        None,
+                        self.connections
+                            .acquire()
+                            .await
+                            .map_err(std::io::Error::other)?,
+                    )
                 };
-                let _permit = self
-                    .connections
-                    .acquire()
-                    .await
-                    .map_err(std::io::Error::other)?;
-                if routed
-                    && !self
-                        .routed_pacer
-                        .wait_with_interval(cancel, || self.routed_adaptive.snapshot().1)
-                        .await
-                {
-                    return Err(std::io::ErrorKind::Interrupted.into());
-                }
                 // Queueing for a rate/connection slot does not consume the network timeout.
                 let deadline_ms = self.deadline_ms(ip, false, timeout_ms);
                 let timeout = Duration::from_millis(u64::from(deadline_ms));
@@ -505,7 +511,7 @@ impl TcpProber {
                     }
                 }
                 if routed && replied && !cancel.is_cancelled() {
-                    self.routed_adaptive.observe(Observation::Reply {
+                    path.controller.observe(Observation::Reply {
                         rtt_ms: Some(started.elapsed().as_secs_f64() * 1000.0),
                         timeout_ms,
                     });
@@ -555,6 +561,71 @@ impl TcpProber {
             }
         }
         ping
+    }
+
+    // A path waiting for pacing must not occupy shared slots. If capacity was
+    // unavailable, wait without holding another slot, then pace the actual start again.
+    async fn routed_slots<'a>(
+        &'a self,
+        path: &super::routes::PathBudget,
+        cancel: &CancellationToken,
+    ) -> Option<(
+        tokio::sync::SemaphorePermit<'a>,
+        tokio::sync::SemaphorePermit<'a>,
+    )> {
+        loop {
+            if !path
+                .pacer
+                .wait_with_interval(cancel, || path.controller.snapshot().1)
+                .await
+            {
+                return None;
+            }
+            if let Ok(routed) = self.routed_connections.try_acquire() {
+                if let Ok(connection) = self.connections.try_acquire() {
+                    return Some((routed, connection));
+                }
+                drop(routed);
+                drop(
+                    cancel
+                        .run_until_cancelled(self.connections.acquire())
+                        .await?
+                        .ok()?,
+                );
+            } else {
+                drop(
+                    cancel
+                        .run_until_cancelled(self.routed_connections.acquire())
+                        .await?
+                        .ok()?,
+                );
+            }
+        }
+    }
+
+    async fn routed_echo_slot<'a>(
+        &'a self,
+        path: &super::routes::PathBudget,
+        cancel: &CancellationToken,
+    ) -> Option<tokio::sync::SemaphorePermit<'a>> {
+        loop {
+            if !path
+                .pacer
+                .wait_with_interval(cancel, || path.controller.snapshot().1)
+                .await
+            {
+                return None;
+            }
+            if let Ok(permit) = self.routed_icmp.try_acquire() {
+                return Some(permit);
+            }
+            drop(
+                cancel
+                    .run_until_cancelled(self.routed_icmp.acquire())
+                    .await?
+                    .ok()?,
+            );
+        }
     }
 
     #[cfg(test)]
@@ -615,6 +686,48 @@ fn local_ranges(networks: &[network::LocalNetwork]) -> Vec<(u32, u32)> {
 #[cfg(test)]
 mod timing_tests {
     use super::*;
+
+    #[test]
+    fn a_pacing_path_does_not_occupy_shared_tcp_or_icmp_slots() {
+        let prober = TcpProber::with_options(ScanMode::Fast, 128, true).unwrap();
+        prober.runtime.block_on(async {
+            let slow = super::super::routes::PathBudget {
+                controller: Arc::new(AdaptiveConcurrency::new(false, true, 64, true)),
+                pacer: ProbePacer::new(Duration::from_secs(10), 8),
+            };
+            *slow.pacer.window.lock().await = (tokio::time::Instant::now(), 8);
+            let healthy = super::super::routes::PathBudget {
+                controller: Arc::new(AdaptiveConcurrency::new(false, true, 64, true)),
+                pacer: ProbePacer::new(Duration::ZERO, 8),
+            };
+            let cancel = CancellationToken::new();
+            let waiting = prober.routed_slots(&slow, &cancel);
+            let observe = async {
+                tokio::task::yield_now().await;
+                assert_eq!(prober.routed_connections.available_permits(), 64);
+                assert_eq!(prober.connections.available_permits(), FAST_TCP_CONNECTIONS);
+                let fresh = CancellationToken::new();
+                let slots = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    prober.routed_slots(&healthy, &fresh),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                drop(slots);
+                cancel.cancel();
+            };
+            assert!(join(waiting, observe).await.0.is_none());
+            let cancel = CancellationToken::new();
+            let waiting = prober.routed_echo_slot(&slow, &cancel);
+            let observe = async {
+                tokio::task::yield_now().await;
+                assert_eq!(prober.routed_icmp.available_permits(), 32);
+                cancel.cancel();
+            };
+            assert!(join(waiting, observe).await.0.is_none());
+        });
+    }
 
     #[test]
     fn learned_deadlines_are_isolated_by_host_transport_and_confirmation_budget() {

@@ -126,14 +126,16 @@ fn native_echo_publishes_an_incomplete_live_row_while_tcp_is_queued() {
             )
             .unwrap()
         });
-        let ScanEvent::Host(partial) = events.recv_timeout(Duration::from_secs(2)).unwrap() else {
+        let progress = events.recv_timeout(Duration::from_secs(2));
+        // Always release a worker waiting for TCP slots, even if the assertion fails.
+        cancel.cancel();
+        let stopped = worker.join().unwrap();
+        let ScanEvent::Host(partial) = progress.unwrap() else {
             panic!("Expected early row");
         };
         assert_eq!(partial.status, HostStatus::Alive);
         assert!(partial.ping_ms.is_some());
         assert!(!partial.discovery_complete());
-        cancel.cancel();
-        let stopped = worker.join().unwrap();
         assert_eq!(stopped.status, HostStatus::Alive);
         assert!(!stopped.discovery_complete());
     });
@@ -1477,4 +1479,40 @@ fn randomized_mac_does_not_invent_a_brand() {
         probable_brand(mac, "apple-pie"),
         "Unknown (randomized/local MAC)"
     );
+}
+
+#[test]
+fn scan_target_lists_visit_only_selected_addresses_and_exclusions() {
+    let targets = crate::targets::TargetSet::parse("127.0.0.1-3 !127.0.0.2").unwrap();
+    let options = ScanOptions {
+        mode: ScanMode::Fast,
+        targets: targets.bounds(),
+        ports: Vec::new(),
+        timeout_ms: 100,
+        workers: 8,
+        adaptive_concurrency: true,
+        resolve_names: false,
+        fetch_mac: false,
+        fetch_vendor: false,
+        discover_arp: false,
+        extra: ExtraOptions::default(),
+    };
+    let scan = start_scan_targets_with_notifier(options, targets, || {});
+    let mut hosts = HashMap::new();
+    loop {
+        match scan.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            ScanEvent::Host(host) => {
+                hosts.insert(host.ip, *host);
+            }
+            ScanEvent::Finished { cancelled, .. } => {
+                assert!(!cancelled);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(hosts.len(), 2);
+    assert!(hosts.contains_key(&Ipv4Addr::new(127, 0, 0, 1)));
+    assert!(hosts.contains_key(&Ipv4Addr::new(127, 0, 0, 3)));
+    assert!(!hosts.contains_key(&Ipv4Addr::new(127, 0, 0, 2)));
 }

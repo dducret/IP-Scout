@@ -402,6 +402,9 @@ pub fn device_identity(host: &HostResult) -> String {
     add("Resolved name", &host.hostname);
     add("NetBIOS", &host.extra.netbios);
     add("LLMNR", &host.extra.llmnr);
+    for service in &host.extra.services {
+        add("Service evidence", &service.summary());
+    }
     if host.extra.udp.snmp.starts_with("161/udp: SNMPv2c |") {
         add("SNMP (reported)", &host.extra.udp.snmp);
     }

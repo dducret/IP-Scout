@@ -1,5 +1,28 @@
 use std::net::Ipv4Addr;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct RoutePath {
+    pub interface_index: u32,
+    pub source: Ipv4Addr,
+    pub next_hop: Ipv4Addr,
+}
+
+impl RoutePath {
+    pub fn summary(&self) -> String {
+        if self.next_hop.is_unspecified() {
+            format!(
+                "Interface {} | source {} | directly connected",
+                self.interface_index, self.source
+            )
+        } else {
+            format!(
+                "Interface {} | source {} | via {}",
+                self.interface_index, self.source, self.next_hop
+            )
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct EchoReply {
     pub round_trip_ms: f64,
@@ -225,6 +248,37 @@ mod platform {
         }
     }
 
+    pub fn route_path(ip: Ipv4Addr) -> Option<RoutePath> {
+        unsafe {
+            let mut address = SOCKADDR_IN {
+                sin_family: AF_INET,
+                ..Default::default()
+            };
+            address.sin_addr.S_un.S_addr = u32::from_ne_bytes(ip.octets());
+            let mut route = MIB_IPFORWARD_ROW2::default();
+            let mut source = SOCKADDR_INET::default();
+            if GetBestRoute2(
+                ptr::null(),
+                0,
+                ptr::null(),
+                &SOCKADDR_INET { Ipv4: address },
+                0,
+                &mut route,
+                &mut source,
+            ) != 0
+                || source.si_family != AF_INET
+                || route.NextHop.si_family != AF_INET
+            {
+                return None;
+            }
+            Some(RoutePath {
+                interface_index: route.InterfaceIndex,
+                source: Ipv4Addr::from(source.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()),
+                next_hop: Ipv4Addr::from(route.NextHop.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()),
+            })
+        }
+    }
+
     fn local_neighbor(ip: Ipv4Addr) -> Option<(MIB_IPNET_ROW2, SOCKADDR_INET)> {
         if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
             return None;
@@ -393,7 +447,13 @@ mod platform {
 #[cfg(windows)]
 pub use platform::{
     discover_arp, discover_arp_bounded, local_networks, mac_address, native_hostname, ping_reply,
+    route_path,
 };
+
+#[cfg(not(windows))]
+pub fn route_path(_ip: Ipv4Addr) -> Option<RoutePath> {
+    None
+}
 
 #[cfg(not(windows))]
 pub async fn discover_arp_bounded(

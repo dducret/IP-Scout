@@ -9,7 +9,7 @@ use ip_scout::{
         self, ConcurrencySnapshot, ExtraOptions, HostResult, HostStatus, ScanEvent, ScanHandle,
         ScanMode, ScanOptions,
     },
-    targets::{TargetRange, format_ports, parse_ports},
+    targets::{TargetRange, TargetSet, format_ports, parse_ports},
     udp,
 };
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ use std::{
 const GREEN: Color32 = Color32::from_rgb(20, 133, 96);
 #[path = "app/view.rs"]
 mod view;
+#[path = "app/workflows.rs"]
+mod workflows;
 const BLUE: Color32 = Color32::from_rgb(35, 111, 192);
 const MUTED: Color32 = Color32::from_rgb(116, 125, 133);
 const RED: Color32 = Color32::from_rgb(192, 61, 63);
@@ -37,7 +39,7 @@ const PORT_PRESETS: [(&str, &str); 6] = [
     ("All TCP", "1-65535"),
 ];
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     #[serde(default = "legacy_scan_mode")]
@@ -156,6 +158,7 @@ impl CopyFeedback {
 }
 
 pub struct ScoutApp {
+    workflow: workflows::WorkflowState,
     logo: egui::TextureHandle,
     settings: Settings,
     networks: Vec<LocalNetwork>,
@@ -285,6 +288,7 @@ impl ScoutApp {
                 .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
         });
         Self {
+            workflow: workflows::WorkflowState::new(cc),
             logo: {
                 let icon = eframe::icon_data::from_png_bytes(include_bytes!(
                     "../assets/ip-scout-logo.png"
@@ -353,6 +357,27 @@ impl ScoutApp {
     }
 
     fn begin_scan(&mut self, ctx: &egui::Context) {
+        self.workflow.scan_targets = None;
+        self.begin_scan_impl(ctx);
+    }
+
+    fn begin_scan_impl(&mut self, ctx: &egui::Context) {
+        if self.workflow.busy() {
+            return;
+        }
+        let targets = match self
+            .workflow
+            .scan_targets
+            .take()
+            .map(Ok)
+            .unwrap_or_else(|| TargetSet::parse(&self.settings.target))
+        {
+            Ok(targets) => targets,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         let required = fetchers::requirements(self.selected_fetchers());
         let options = (|| {
             if self.udp_enabled() && self.settings.snmp_community.len() > 255 {
@@ -360,7 +385,7 @@ impl ScoutApp {
             }
             Ok::<_, String>(ScanOptions {
                 mode: self.settings.mode,
-                targets: TargetRange::parse(&self.settings.target)?,
+                targets: targets.bounds(),
                 ports: if required.tcp || required.web {
                     parse_ports(&self.settings.ports)?
                 } else {
@@ -398,13 +423,16 @@ impl ScoutApp {
                     banners: required.banners,
                     certificates: required.certificates,
                     web_titles: required.web_titles,
+                    services: required.services,
                 },
             })
         })();
         match options {
             Err(error) => self.error = Some(error),
             Ok(options) => {
-                self.total = options.targets.len();
+                self.workflow
+                    .record_scan(&options, &targets, self.selected_fetchers().to_vec());
+                self.total = targets.len();
                 self.checked = 0;
                 self.concurrency = None;
                 self.scan_complete = false;
@@ -423,9 +451,11 @@ impl ScoutApp {
                 self.dirty = true;
                 self.message = format!("Scanning {}", self.settings.target);
                 let ctx = ctx.clone();
-                self.scan = Some(scanner::start_scan_with_notifier(options, move || {
-                    ctx.request_repaint()
-                }));
+                self.scan = Some(scanner::start_scan_targets_with_notifier(
+                    options,
+                    targets,
+                    move || ctx.request_repaint(),
+                ));
             }
         }
     }
@@ -684,6 +714,10 @@ impl ScoutApp {
                         if icon_button(ui, icons::GEAR, "Scan settings").clicked() {
                             self.show_settings = true;
                         }
+                        if ui.button("Tools").on_hover_text("Targets, profiles and scan history").clicked() {
+                            self.workflow.open = true;
+                            self.workflow.target_draft = self.settings.target.clone();
+                        }
                         let fetchers = ui.button(format!("{} Fetchers", icons::LIST_CHECKS));
                         #[cfg(feature = "gui-smoke")]
                         {
@@ -699,14 +733,14 @@ impl ScoutApp {
                 });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label("IP range");
+                    ui.label("Targets");
                     let available = (ui.available_width() - 255.0).max(180.0);
                     ui.add_enabled(
                         self.scan.is_none(),
                         egui::TextEdit::singleline(&mut self.settings.target)
                             .desired_width(available)
                             .font(egui::TextStyle::Monospace)
-                            .hint_text("192.168.1.0/24"),
+                            .hint_text("192.168.1.0/24, 10.0.0.5, !192.168.1.10"),
                     );
                     ui.add_enabled_ui(self.scan.is_none(), |ui| {
                         egui::ComboBox::from_id_salt("local_network")
@@ -750,7 +784,7 @@ impl ScoutApp {
                             self.message = "Stopping scan...".into();
                         }
                     } else if ui
-                        .add(
+                        .add_enabled(!self.workflow.busy(),
                             egui::Button::new(
                                 RichText::new(format!("{} Start scan", icons::PLAY))
                                     .color(Color32::WHITE),
@@ -824,8 +858,8 @@ impl ScoutApp {
                             .size(12.0)
                             .color(MUTED),
                         ).on_hover_text(if let Some(snapshot) = self.concurrency.filter(|_| self.scan.is_some()) {
-                            format!("Local host budget: {} / {}\nVPN TCP budget: {} / {}\nVPN pacing: up to 8 starts every {} ms",
-                                snapshot.local_workers, snapshot.max_workers, snapshot.routed_tcp, snapshot.routed_tcp_max, snapshot.routed_interval_ms)
+                            format!("Local host budget: {} / {}\nRouted TCP budget: {} / {}\n{} independent interface/next-hop paths\nSlowest path pacing: up to 8 starts every {} ms",
+                                snapshot.local_workers, snapshot.max_workers, snapshot.routed_tcp, snapshot.routed_tcp_max, snapshot.active_paths, snapshot.routed_interval_ms)
                         } else { "Worker ceiling; routed traffic has separate connection and pacing limits.".into() });
                         let previous = self.settings.mode;
                         ui.add_enabled_ui(self.scan.is_none(), |ui| {
@@ -1040,6 +1074,8 @@ impl ScoutApp {
                             Fetcher::Ubiquiti,
                             Fetcher::Llmnr,
                             Fetcher::ServiceBanners,
+                            Fetcher::ServiceDetails,
+                            Fetcher::NetworkPath,
                             Fetcher::TlsCertificates,
                             Fetcher::WebTitle,
                             Fetcher::DeviceIdentity,
@@ -1188,25 +1224,29 @@ impl ScoutApp {
                             }
                         },
                     );
-                    ui.add_enabled_ui(self.scan.is_none() && !self.hosts.is_empty(), |ui| {
-                        if icon_button(ui, icons::TRASH, "Clear scan results").clicked() {
-                            self.hosts.clear();
-                            self.host_positions.clear();
-                            self.view.clear();
-                            self.visible.clear();
-                            self.selected = None;
-                            self.alive = 0;
-                            self.with_ports = 0;
-                            self.total = 0;
-                            self.checked = 0;
-                            self.scan_complete = true;
-                            self.elapsed = Duration::ZERO;
-                            self.message = "Ready".into();
-                            self.warnings.clear();
-                            self.error = None;
-                            self.dirty = true;
-                        }
-                    });
+                    ui.add_enabled_ui(
+                        self.scan.is_none() && !self.workflow.busy() && !self.hosts.is_empty(),
+                        |ui| {
+                            if icon_button(ui, icons::TRASH, "Clear scan results").clicked() {
+                                self.workflow.clear_current();
+                                self.hosts.clear();
+                                self.host_positions.clear();
+                                self.view.clear();
+                                self.visible.clear();
+                                self.selected = None;
+                                self.alive = 0;
+                                self.with_ports = 0;
+                                self.total = 0;
+                                self.checked = 0;
+                                self.scan_complete = true;
+                                self.elapsed = Duration::ZERO;
+                                self.message = "Ready".into();
+                                self.warnings.clear();
+                                self.error = None;
+                                self.dirty = true;
+                            }
+                        },
+                    );
                 });
                 if let Some(error) = self.error.clone() {
                     ui.horizontal_wrapped(|ui| {
@@ -1256,6 +1296,7 @@ impl ScoutApp {
                 .map(|fetcher| fetcher.width() + 10.0)
                 .sum::<f32>();
         let mut new_sort = None;
+        let mut rescan = None;
         let table_height = (ui.available_height()
             - ui.spacing().scroll.bar_width
             - ui.spacing().scroll.bar_outer_margin)
@@ -1321,7 +1362,7 @@ impl ScoutApp {
                     body.rows(34.0, self.visible.len(), |mut row| {
                         let index = row.index();
                         let host = &self.hosts[self.visible[index]];
-                        row.set_selected(self.selected == Some(host.ip));
+                        row.set_selected(self.workflow.selected.contains(&host.ip));
                         row.col(|ui| {
                             let copy = address_cell(
                                 ui,
@@ -1383,8 +1424,30 @@ impl ScoutApp {
                         let response = row.response();
                         if response.clicked() {
                             self.selected = Some(host.ip);
+                            if ctx.input(|input| input.modifiers.ctrl || input.modifiers.command) {
+                                if !self.workflow.selected.insert(host.ip) {
+                                    self.workflow.selected.remove(&host.ip);
+                                }
+                            } else {
+                                self.workflow.selected.clear();
+                                self.workflow.selected.insert(host.ip);
+                            }
                         }
                         response.context_menu(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.scan.is_none(),
+                                    egui::Button::new("Rescan selected devices"),
+                                )
+                                .clicked()
+                            {
+                                rescan = Some(if self.workflow.selected.contains(&host.ip) {
+                                    self.workflow.selected.iter().copied().collect()
+                                } else {
+                                    vec![host.ip]
+                                });
+                                ui.close();
+                            }
                             if ui
                                 .button(format!("{} Copy IP address", icons::COPY))
                                 .clicked()
@@ -1431,6 +1494,9 @@ impl ScoutApp {
                 self.descending = false;
             }
             self.dirty = true;
+        }
+        if let Some(ips) = rescan {
+            self.begin_selected_scan(ctx, ips);
         }
     }
 
@@ -1694,7 +1760,7 @@ impl ScoutApp {
                             ui.end_row();
                             ui.label("Scan adaptation");
                             ui.checkbox(&mut self.settings.adaptive_concurrency, "Adaptive")
-                                .on_hover_text("Adjusts workers and VPN pacing. Learns per-host ICMP/TCP deadlines from latency and jitter: 50 ms minimum on LAN, 100 ms routed, up to 4× the initial timeout (maximum 5 seconds). Unmeasured hosts keep the initial timeout.");
+                                .on_hover_text("Adjusts workers and routed TCP/ICMP pacing independently for each interface/next hop. Learns per-host deadlines from latency and jitter: 50 ms minimum on LAN, 100 ms routed, up to 4× the initial timeout (maximum 5 seconds). Unmeasured hosts keep the initial timeout.");
                             ui.end_row();
                             ui.label("ICMP samples");
                             ui.add(egui::DragValue::new(&mut self.settings.icmp_samples).range(1..=10))
@@ -2597,6 +2663,7 @@ impl ScoutApp {
 impl eframe::App for ScoutApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive(ctx);
+        self.receive_workflow(ctx);
         self.controls(ctx);
         self.summary(ctx);
         self.rebuild_visible();
@@ -2604,13 +2671,15 @@ impl eframe::App for ScoutApp {
         self.details(ctx);
         self.results(ctx);
         self.windows(ctx);
-        if self.scan.is_some() || self.export_result.is_some() {
+        self.workflow_window(ctx);
+        if self.scan.is_some() || self.export_result.is_some() || self.workflow.busy() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, "settings", &self.settings);
+        eframe::set_value(storage, "profiles", &self.workflow.profiles);
     }
 }
 
@@ -2671,7 +2740,9 @@ fn fetcher_sort(fetcher: Fetcher) -> Sort {
         | Fetcher::Mndp
         | Fetcher::Ubiquiti
         | Fetcher::Llmnr => Sort::Metadata(fetcher),
-        Fetcher::ServiceBanners
+        Fetcher::ServiceDetails
+        | Fetcher::NetworkPath
+        | Fetcher::ServiceBanners
         | Fetcher::TlsCertificates
         | Fetcher::WebTitle
         | Fetcher::DeviceIdentity => Sort::Metadata(fetcher),
@@ -2870,6 +2941,8 @@ fn host_text(host: &HostResult) -> String {
         Fetcher::Ubiquiti,
         Fetcher::Llmnr,
         Fetcher::ServiceBanners,
+        Fetcher::ServiceDetails,
+        Fetcher::NetworkPath,
         Fetcher::TlsCertificates,
         Fetcher::WebTitle,
         Fetcher::DeviceIdentity,

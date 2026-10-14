@@ -106,7 +106,12 @@ impl App for SmokeApp {
                     "adaptive-disabled",
                     "large-range-results",
                     "large-range-search",
-                    "large-range-metadata-sort"
+                    "large-range-metadata-sort",
+                    "tools-targets",
+                    "tools-profiles",
+                    "tools-history",
+                    "service-evidence",
+                    "tools-history-dark"
                 ][self.stage]
             );
             image::save_buffer(
@@ -124,12 +129,15 @@ impl App for SmokeApp {
                 colors.len()
             );
             self.stage += 1;
-            if self.stage == 55 {
+            if self.stage == 60 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
             }
             self.scout
                 .smoke_stage(self.stage, self.listener.local_addr().unwrap().port(), ctx);
+            if self.stage >= 55 {
+                self.scout.smoke_workflows(self.stage, ctx);
+            }
             if self.stage == 7 {
                 self.pending_events.extend(self.scout.smoke_port_click(2));
                 self.ports_phase = 4;

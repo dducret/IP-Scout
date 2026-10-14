@@ -1,4 +1,5 @@
 use super::*;
+use crate::targets::{TargetRange, TargetSet};
 use hickory_proto::rr::{Record, rdata::PTR};
 use hickory_proto::{
     op::{Message, MessageType, Query},
@@ -12,6 +13,32 @@ fn runtime() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .unwrap()
+}
+
+#[test]
+fn excluded_udp_peers_are_filtered_before_metadata_fetches() {
+    runtime().block_on(async {
+        let targets = TargetSet::parse("127.0.0.0-127.0.0.2,!127.0.0.1").unwrap();
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metadata = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let packet = format!("HTTP/1.1 200 OK\r\nUSN: uuid:test\r\nST: upnp:rootdevice\r\nLOCATION: http://127.0.0.1:{}/description\r\n\r\n", metadata.local_addr().unwrap().port());
+        sender.send_to(packet.as_bytes(), receiver.local_addr().unwrap()).await.unwrap();
+        let mut snapshot = Snapshot::default();
+        let _ = tokio::time::timeout(Duration::from_millis(50), receive(&receiver, Kind::Ssdp, &targets, &mut snapshot)).await;
+        assert!(snapshot.hosts.is_empty());
+
+        // Defense in depth: even a snapshot containing an excluded sender or a
+        // location pointing to a different IP cannot cause a directed request.
+        for ip in [Ipv4Addr::LOCALHOST, Ipv4Addr::new(127, 0, 0, 2)] {
+            snapshot.hosts.entry(ip).or_default().advertisements.ssdp.push(UpnpDevice {
+                location: format!("http://127.0.0.1:{}/description", metadata.local_addr().unwrap().port()),
+                ..Default::default()
+            });
+        }
+        enrich_upnp(&mut snapshot, &targets, &CancellationToken::new()).await;
+        assert!(tokio::time::timeout(Duration::from_millis(50), metadata.accept()).await.is_err());
+    });
 }
 fn tlv(data: &mut Vec<u8>, kind: u16, value: &[u8], wide: bool) {
     if wide {
@@ -182,7 +209,11 @@ fn upnp_fetches_a_size_limited_description_without_following_redirects() {
             ..Default::default()
         },
     ];
-    runtime().block_on(enrich_upnp(&mut snapshot, &CancellationToken::new()));
+    runtime().block_on(enrich_upnp(
+        &mut snapshot,
+        &TargetRange::parse("127.0.0.1").unwrap(),
+        &CancellationToken::new(),
+    ));
     server.join().unwrap();
     let devices = &snapshot.hosts[&Ipv4Addr::LOCALHOST].advertisements.ssdp;
     assert!(devices[0].name.is_empty());
@@ -319,7 +350,15 @@ fn upnp_description_work_is_cancelled_and_oversized_xml_is_rejected() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         };
         let start = std::time::Instant::now();
-        futures_util::future::join(enrich_upnp(&mut snapshot, &cancel), fixture).await;
+        futures_util::future::join(
+            enrich_upnp(
+                &mut snapshot,
+                &TargetRange::parse("127.0.0.1").unwrap(),
+                &cancel,
+            ),
+            fixture,
+        )
+        .await;
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(
             snapshot.hosts[&Ipv4Addr::LOCALHOST].advertisements.ssdp[0]

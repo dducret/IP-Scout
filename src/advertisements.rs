@@ -1,4 +1,4 @@
-use crate::{discovery::Snapshot, targets::TargetRange};
+use crate::{discovery::Snapshot, targets::TargetScope};
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::{net::Ipv4Addr, time::Duration};
@@ -115,8 +115,8 @@ pub(crate) fn clean(value: &str) -> String {
 fn text(bytes: &[u8]) -> String {
     clean(&String::from_utf8_lossy(bytes))
 }
-fn in_range(ip: Ipv4Addr, targets: &TargetRange) -> bool {
-    (targets.first..=targets.last).contains(&u32::from(ip))
+fn in_range(ip: Ipv4Addr, targets: &dyn TargetScope) -> bool {
+    targets.contains_ip(ip)
 }
 
 fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
@@ -145,7 +145,7 @@ fn merge(target: &mut Snapshot, other: Snapshot) {
 }
 
 pub async fn collect(
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     interfaces: &[Ipv4Addr],
     options: Options,
     budget: Duration,
@@ -194,7 +194,7 @@ pub async fn collect(
     }
     merge(&mut snapshot, mndp);
     if options.ssdp && !cancel.is_cancelled() {
-        enrich_upnp(&mut snapshot, cancel).await;
+        enrich_upnp(&mut snapshot, targets, cancel).await;
     }
     snapshot
 }

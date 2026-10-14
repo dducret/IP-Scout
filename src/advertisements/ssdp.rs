@@ -1,5 +1,6 @@
 use super::{UpnpDevice, clean};
 use crate::discovery::{self, Snapshot};
+use crate::targets::TargetScope;
 use futures_util::{StreamExt, stream};
 use std::collections::HashMap;
 use std::{net::Ipv4Addr, time::Duration};
@@ -60,7 +61,11 @@ pub(super) fn parse_ssdp(data: &[u8], peer: Ipv4Addr) -> Option<UpnpDevice> {
     })
 }
 
-pub(super) async fn enrich_upnp(snapshot: &mut Snapshot, cancel: &CancellationToken) {
+pub(super) async fn enrich_upnp(
+    snapshot: &mut Snapshot,
+    targets: &dyn TargetScope,
+    cancel: &CancellationToken,
+) {
     if !snapshot.hosts.values().any(|info| {
         info.advertisements
             .ssdp
@@ -80,8 +85,11 @@ pub(super) async fn enrich_upnp(snapshot: &mut Snapshot, cancel: &CancellationTo
     };
     let mut locations: HashMap<String, Vec<(Ipv4Addr, usize)>> = HashMap::new();
     for (&ip, info) in &snapshot.hosts {
+        if !targets.contains_ip(ip) {
+            continue;
+        }
         for (index, device) in info.advertisements.ssdp.iter().enumerate() {
-            if device.location.is_empty()
+            if safe_location(&device.location, ip).is_none()
                 || locations.len() >= 128 && !locations.contains_key(&device.location)
             {
                 continue;

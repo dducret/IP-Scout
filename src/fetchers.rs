@@ -36,10 +36,12 @@ pub enum Fetcher {
     DnsInfo,
     NtpInfo,
     SnmpInfo,
+    ServiceDetails,
+    NetworkPath,
 }
 
 impl Fetcher {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 32] = [
         Self::Ping,
         Self::Hostname,
         Self::Ports,
@@ -70,6 +72,8 @@ impl Fetcher {
         Self::DnsInfo,
         Self::NtpInfo,
         Self::SnmpInfo,
+        Self::ServiceDetails,
+        Self::NetworkPath,
     ];
 
     pub fn label(self) -> &'static str {
@@ -105,6 +109,8 @@ impl Fetcher {
             Self::DnsInfo => "DNS service",
             Self::NtpInfo => "NTP service",
             Self::SnmpInfo => "SNMP info",
+            Self::ServiceDetails => "Service details",
+            Self::NetworkPath => "Network path",
         }
     }
 
@@ -124,7 +130,11 @@ impl Fetcher {
             Self::Bonjour | Self::Wsd | Self::Ssdp | Self::Mndp | Self::Ubiquiti => 360.0,
             Self::RetiredLinkNeighbors => 0.0,
             Self::Llmnr => 190.0,
-            Self::ServiceBanners | Self::TlsCertificates | Self::DeviceIdentity => 360.0,
+            Self::ServiceBanners
+            | Self::TlsCertificates
+            | Self::DeviceIdentity
+            | Self::ServiceDetails
+            | Self::NetworkPath => 360.0,
             Self::WebTitle => 280.0,
             Self::UdpPorts => 160.0,
             Self::UdpStatus | Self::DnsInfo | Self::NtpInfo | Self::SnmpInfo => 360.0,
@@ -201,6 +211,19 @@ impl Fetcher {
                 .collect::<Vec<_>>()
                 .join("; "),
             Self::DeviceIdentity => crate::inventory::device_identity(host),
+            Self::ServiceDetails => host
+                .extra
+                .services
+                .iter()
+                .map(|service| service.summary())
+                .collect::<Vec<_>>()
+                .join("; "),
+            Self::NetworkPath => host
+                .extra
+                .route
+                .as_ref()
+                .map(|route| route.summary())
+                .unwrap_or_default(),
             Self::UdpPorts => host
                 .extra
                 .udp
@@ -315,6 +338,12 @@ impl Fetcher {
             Self::Llmnr => {
                 "Unicast TCP 5355 reverse-name query on directly connected IPv4 networks, with TTL 1. Many devices disable LLMNR. No multicast enumeration, authentication or network setting changes."
             }
+            Self::ServiceDetails => {
+                "Identify protocols from greeting bytes or bounded read-only SMB, RTSP and Redis probes; includes response evidence and labels unverified server claims."
+            }
+            Self::NetworkPath => {
+                "The Windows-selected interface, source address and next hop. Routed traffic adapts separately for each interface/next-hop path."
+            }
             Self::ServiceBanners => {
                 "Reads server greetings on open FTP, SSH, SMTP, POP3, IMAP, VNC and eligible custom ports. Up to 16 ports; no commands or credentials. Known printer and binary protocol ports are excluded. Reported software is unverified."
             }
@@ -357,7 +386,7 @@ pub fn defaults() -> Vec<Fetcher> {
     ]
 }
 
-pub const INVENTORY_PORTS: &str = "21,22,25,53,80,110,135,139,143,389,443,445,465,587,631,636,853,993,995,1883,3389,5357,5900,5985,5986,8000,8080,8443,8888,9100";
+pub const INVENTORY_PORTS: &str = "21,22,25,53,80,110,135,139,143,389,443,445,465,554,587,631,636,853,993,995,1883,3389,5357,5900,5985,5986,6379,8000,8080,8443,8888,9100";
 
 pub fn inventory() -> Vec<Fetcher> {
     Fetcher::ALL
@@ -403,6 +432,7 @@ pub struct Requirements {
     pub banners: bool,
     pub certificates: bool,
     pub web_titles: bool,
+    pub services: bool,
 }
 
 pub fn requirements(fetchers: &[Fetcher]) -> Requirements {
@@ -422,6 +452,7 @@ pub fn requirements(fetchers: &[Fetcher]) -> Requirements {
                     | Fetcher::RefusedPorts
                     | Fetcher::ServiceBanners
                     | Fetcher::TlsCertificates
+                    | Fetcher::ServiceDetails
             )
         }),
         dns: fetchers.contains(&Fetcher::Hostname)
@@ -433,7 +464,11 @@ pub fn requirements(fetchers: &[Fetcher]) -> Requirements {
         web: fetchers.iter().any(|fetcher| {
             matches!(
                 fetcher,
-                Fetcher::WebDetect | Fetcher::HttpStatus | Fetcher::WebUrl | Fetcher::WebTitle
+                Fetcher::WebDetect
+                    | Fetcher::HttpStatus
+                    | Fetcher::WebUrl
+                    | Fetcher::WebTitle
+                    | Fetcher::ServiceDetails
             )
         }),
         packet_loss: fetchers.contains(&Fetcher::PacketLoss),
@@ -448,6 +483,7 @@ pub fn requirements(fetchers: &[Fetcher]) -> Requirements {
         banners: fetchers.contains(&Fetcher::ServiceBanners),
         certificates: fetchers.contains(&Fetcher::TlsCertificates),
         web_titles: fetchers.contains(&Fetcher::WebTitle),
+        services: fetchers.contains(&Fetcher::ServiceDetails),
     }
 }
 

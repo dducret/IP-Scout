@@ -62,6 +62,7 @@ pub(super) fn scan_host_with_progress(
         probable_brand: String::new(),
         extra: ExtraResult::default(),
     };
+    result.extra.route = prober.paths.route(ip);
     let partial = Mutex::new(result.clone());
     let (ping, ports) = prober.probe_progress(
         ip,
@@ -355,6 +356,7 @@ pub(super) fn enrich_host(
         || options.extra.llmnr
         || options.extra.banners
         || options.extra.certificates
+        || options.extra.services
         || options.extra.packet_loss && options.extra.icmp_samples > 1
         || initial_alive && (options.resolve_names || options.fetch_mac))
     {
@@ -563,6 +565,42 @@ pub(super) fn enrich_host(
         if !result.extra.certificates.is_empty() {
             result.status = HostStatus::Alive;
         }
+    }
+    if probe_extra && options.extra.services && !cancel.is_cancelled() {
+        publisher.publish(result.clone());
+        result.extra.services = prober.runtime.block_on(prober.services.probe(
+            ip,
+            &result.open_ports,
+            Duration::from_millis(u64::from(options.timeout_ms.max(1))),
+            cancel,
+        ));
+        for web in &result.extra.web {
+            if let Ok(url) = reqwest::Url::parse(&web.url)
+                && let Some(port) = url.port_or_known_default()
+            {
+                result
+                    .extra
+                    .services
+                    .push(crate::services::ServiceIdentification {
+                        port,
+                        protocol: url.scheme().to_ascii_uppercase(),
+                        product: web.server.clone(),
+                        evidence: format!(
+                            "{}: HTTP response {}; Server header is an unverified claim",
+                            web.url, web.status
+                        ),
+                    });
+            }
+        }
+        result.extra.services.sort_by(|a, b| {
+            (a.port, &a.protocol, &a.product, &a.evidence).cmp(&(
+                b.port,
+                &b.protocol,
+                &b.product,
+                &b.evidence,
+            ))
+        });
+        result.extra.services.dedup();
     }
     if !identity_collected && result.status == HostStatus::Alive && !cancel.is_cancelled() {
         let identity = self::identity(ip, options, resolver, prober, cancel);

@@ -65,6 +65,8 @@ pub struct ExtraResult {
     pub llmnr: String,
     pub banners: Vec<ServiceBanner>,
     pub certificates: Vec<TlsCertificate>,
+    pub services: Vec<crate::services::ServiceIdentification>,
+    pub route: Option<crate::network::RoutePath>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +85,7 @@ pub struct ExtraOptions {
     pub banners: bool,
     pub certificates: bool,
     pub web_titles: bool,
+    pub services: bool,
 }
 
 impl Default for ExtraOptions {
@@ -102,6 +105,7 @@ impl Default for ExtraOptions {
             banners: false,
             certificates: false,
             web_titles: false,
+            services: false,
         }
     }
 }
@@ -162,4 +166,5 @@ pub struct ConcurrencySnapshot {
     pub routed_tcp: usize,
     pub routed_tcp_max: usize,
     pub routed_interval_ms: u64,
+    pub active_paths: usize,
 }

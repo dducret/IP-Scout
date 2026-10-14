@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "ip-scout"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "csv",
  "eframe",
@@ -1766,6 +1766,7 @@ dependencies = [
  "rfd",
  "scraper",
  "serde",
+ "serde_json",
  "snmp2",
  "sntpc",
  "sntpc-net-tokio",

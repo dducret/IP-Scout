@@ -3,7 +3,7 @@ use super::{
     ssdp::parse_ssdp,
     vendor::{parse_mndp, parse_ubiquiti},
 };
-use crate::{discovery::Snapshot, targets::TargetRange};
+use crate::{discovery::Snapshot, targets::TargetScope};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -47,7 +47,7 @@ pub(super) fn socket(ip: Ipv4Addr, kind: Kind) -> std::io::Result<tokio::net::Ud
 pub(super) async fn udp_on(
     ip: Ipv4Addr,
     kind: Kind,
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     budget: Duration,
     cancel: &CancellationToken,
 ) -> Snapshot {
@@ -109,7 +109,7 @@ pub(super) fn broadcast_for(
 pub(super) async fn receive(
     sock: &tokio::net::UdpSocket,
     kind: Kind,
-    targets: &TargetRange,
+    targets: &dyn TargetScope,
     snapshot: &mut Snapshot,
 ) {
     let mut buffer = [0u8; 16_385];
