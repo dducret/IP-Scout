@@ -22,7 +22,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(super) fn scan_host(
     ip: Ipv4Addr,
     options: &ScanOptions,

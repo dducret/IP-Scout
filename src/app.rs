@@ -21,6 +21,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "app/i18n.rs"]
+mod i18n;
+use i18n::{Language, Locale, Message};
+
 const GREEN: Color32 = Color32::from_rgb(20, 133, 96);
 #[path = "app/view.rs"]
 mod view;
@@ -76,8 +80,8 @@ impl Default for Settings {
             workers: 256,
             adaptive_concurrency: true,
             resolve_names: true,
-            fetch_mac: true,
-            discover_arp: true,
+            fetch_mac: network::ARP_SUPPORTED,
+            discover_arp: network::ARP_SUPPORTED,
             dark: false,
             fetchers: None,
             icmp_samples: 3,
@@ -158,6 +162,7 @@ impl CopyFeedback {
 }
 
 pub struct ScoutApp {
+    language: Language,
     workflow: workflows::WorkflowState,
     logo: egui::TextureHandle,
     settings: Settings,
@@ -182,7 +187,7 @@ pub struct ScoutApp {
     with_ports: usize,
     started: Option<Instant>,
     elapsed: Duration,
-    message: String,
+    message: Message,
     error: Option<String>,
     warnings: Vec<String>,
     show_settings: bool,
@@ -192,7 +197,7 @@ pub struct ScoutApp {
     ports_error: Option<String>,
     ports_focus: bool,
     ports_are_udp: bool,
-    export_result: Option<Receiver<Result<String, String>>>,
+    export_result: Option<Receiver<Result<Message, String>>>,
     show_fetchers: bool,
     fetchers_draft: FetcherDraft,
     fetcher_scroll_selected: bool,
@@ -210,6 +215,8 @@ pub struct ScoutApp {
     smoke_mode_buttons: [Option<egui::Pos2>; 2],
     #[cfg(feature = "gui-smoke")]
     smoke_udp_button: Option<egui::Pos2>,
+    #[cfg(feature = "gui-smoke")]
+    smoke_language_buttons: [Option<egui::Pos2>; 4],
 }
 
 fn upsert_host(
@@ -242,11 +249,15 @@ fn has_open_ports(host: &HostResult) -> bool {
     !host.open_ports.is_empty() || !host.extra.udp.open_ports.is_empty()
 }
 
-fn scan_finished_message(cancelled: bool, checked: usize, total: usize) -> String {
+fn scan_finished_message(cancelled: bool, checked: usize, total: usize) -> Message {
     if cancelled {
-        format!(
-            "Scan stopped: {checked}/{total} checked, {} unchecked; fetchers may be incomplete",
-            total.saturating_sub(checked)
+        Message::new(
+            "Scan stopped: {0}/{1} checked, {2} unchecked; fetchers may be incomplete",
+            vec![
+                checked.to_string(),
+                total.to_string(),
+                total.saturating_sub(checked).to_string(),
+            ],
         )
     } else {
         "Scan complete".into()
@@ -288,11 +299,16 @@ impl ScoutApp {
                 .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
         });
         Self {
+            language: cc
+                .storage
+                .and_then(|storage| eframe::get_value(storage, "language"))
+                .unwrap_or_default(),
             workflow: workflows::WorkflowState::new(cc),
             logo: {
-                let icon = eframe::icon_data::from_png_bytes(include_bytes!(
-                    "../assets/ip-scout-logo.png"
-                ))
+                let icon = eframe::icon_data::from_png_bytes(include_bytes!(concat!(
+                    env!("OUT_DIR"),
+                    "/runtime-logo.png"
+                )))
                 .expect("bundled IP Scout logo must be a valid PNG");
                 cc.egui_ctx.load_texture(
                     "ip-scout-logo",
@@ -353,6 +369,8 @@ impl ScoutApp {
             smoke_mode_buttons: [None; 2],
             #[cfg(feature = "gui-smoke")]
             smoke_udp_button: None,
+            #[cfg(feature = "gui-smoke")]
+            smoke_language_buttons: [None; 4],
         }
     }
 
@@ -395,9 +413,9 @@ impl ScoutApp {
                 workers: self.settings.workers,
                 adaptive_concurrency: self.settings.adaptive_concurrency,
                 resolve_names: required.dns,
-                fetch_mac: required.mac,
-                fetch_vendor: required.vendor,
-                discover_arp: self.settings.discover_arp,
+                fetch_mac: required.mac && network::ARP_SUPPORTED,
+                fetch_vendor: required.vendor && network::ARP_SUPPORTED,
+                discover_arp: self.settings.discover_arp && network::ARP_SUPPORTED,
                 extra: ExtraOptions {
                     udp: udp::Options {
                         ports: if required.udp {
@@ -447,9 +465,16 @@ impl ScoutApp {
                 self.started = Some(Instant::now());
                 self.error = None;
                 self.warnings.clear();
+                if self
+                    .selected_fetchers()
+                    .iter()
+                    .any(|&fetcher| !fetcher_supported(fetcher))
+                {
+                    self.warnings.push("Some selected fetchers are unavailable on this platform; existing historical values remain readable.".into());
+                }
                 self.stopping = false;
                 self.dirty = true;
-                self.message = format!("Scanning {}", self.settings.target);
+                self.message = Message::new("Scanning {0}", vec![self.settings.target.clone()]);
                 let ctx = ctx.clone();
                 self.scan = Some(scanner::start_scan_targets_with_notifier(
                     options,
@@ -561,7 +586,8 @@ impl ScoutApp {
                 match scan.events.try_recv() {
                     Ok(ScanEvent::Host(host)) => {
                         if self.hosts.is_empty() && !self.stopping {
-                            self.message = format!("Scanning {}", self.settings.target);
+                            self.message =
+                                Message::new("Scanning {0}", vec![self.settings.target.clone()]);
                         }
                         let previous = self.host_positions.get(&host.ip).copied();
                         self.view.invalidate(previous.unwrap_or(self.hosts.len()));
@@ -583,7 +609,7 @@ impl ScoutApp {
                     }
                     Ok(ScanEvent::Phase(message)) => {
                         if !self.stopping {
-                            self.message = message;
+                            self.message = Message::phase(message);
                         }
                     }
                     Ok(ScanEvent::Concurrency(snapshot)) => self.concurrency = Some(snapshot),
@@ -644,6 +670,7 @@ impl ScoutApp {
     }
 
     fn begin_export(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         let fetchers = self.selected_fetchers().to_vec();
         let snapshot: Vec<_> = self
             .visible
@@ -657,9 +684,9 @@ impl ScoutApp {
         std::thread::spawn(move || {
             let result = if let Some(path) = rfd::FileDialog::new()
                 .set_title(if partial {
-                    "Export partial scan results"
+                    tr.text("Export partial scan results")
                 } else {
-                    "Export visible scan results"
+                    tr.text("Export visible scan results")
                 })
                 .add_filter("CSV", &["csv"])
                 .set_file_name(if partial {
@@ -671,10 +698,15 @@ impl ScoutApp {
             {
                 let hosts: Vec<_> = snapshot.iter().collect();
                 export::save_csv_with_fetchers(&path, &hosts, &fetchers)
-                    .map(|()| format!("Exported {} hosts to {}", hosts.len(), path.display()))
+                    .map(|()| {
+                        Message::new(
+                            "Exported {0} hosts to {1}",
+                            vec![hosts.len().to_string(), path.display().to_string()],
+                        )
+                    })
                     .map_err(|error| format!("Could not export: {error}"))
             } else {
-                Ok(String::new())
+                Ok("".into())
             };
             let _ = sender.send(result);
             ctx.request_repaint();
@@ -682,6 +714,7 @@ impl ScoutApp {
     }
 
     fn controls(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         egui::TopBottomPanel::top("controls")
             .frame(
                 egui::Frame::new()
@@ -692,9 +725,9 @@ impl ScoutApp {
                 ui.horizontal(|ui| {
                     ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(34.0, 34.0)));
                     ui.label(RichText::new("IP Scout").size(23.0).strong());
-                    ui.label(RichText::new("NETWORK SCANNER").size(11.0).color(MUTED));
+                    ui.label(RichText::new(tr.text("NETWORK SCANNER")).size(11.0).color(MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, icons::INFO, "About IP Scout").clicked() {
+                        if icon_button(ui, icons::INFO, tr.text("About IP Scout")).clicked() {
                             self.show_about = true;
                         }
                         if icon_button(
@@ -704,27 +737,27 @@ impl ScoutApp {
                             } else {
                                 icons::MOON
                             },
-                            "Switch theme",
+                            tr.text("Switch theme"),
                         )
                         .clicked()
                         {
                             self.settings.dark = !self.settings.dark;
                             apply_theme(ctx, self.settings.dark);
                         }
-                        if icon_button(ui, icons::GEAR, "Scan settings").clicked() {
+                        if icon_button(ui, icons::GEAR, tr.text("Scan settings")).clicked() {
                             self.show_settings = true;
                         }
-                        if ui.button("Tools").on_hover_text("Targets, profiles and scan history").clicked() {
+                        if ui.button(tr.text("Tools")).on_hover_text(tr.text("Targets, profiles and scan history")).clicked() {
                             self.workflow.open = true;
                             self.workflow.target_draft = self.settings.target.clone();
                         }
-                        let fetchers = ui.button(format!("{} Fetchers", icons::LIST_CHECKS));
+                        let fetchers = ui.button(tr.format("{0} Fetchers", &[icons::LIST_CHECKS.to_string()]));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_fetcher_buttons[0] = Some(fetchers.rect.center());
                         }
                         if fetchers
-                            .on_hover_text("Select and arrange fetchers")
+                            .on_hover_text(tr.text("Select and arrange fetchers"))
                             .clicked()
                         {
                             self.edit_fetchers();
@@ -733,7 +766,7 @@ impl ScoutApp {
                 });
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label("Targets");
+                    ui.label(tr.text("Targets"));
                     let available = (ui.available_width() - 255.0).max(180.0);
                     ui.add_enabled(
                         self.scan.is_none(),
@@ -744,11 +777,11 @@ impl ScoutApp {
                     );
                     ui.add_enabled_ui(self.scan.is_none(), |ui| {
                         egui::ComboBox::from_id_salt("local_network")
-                            .selected_text(format!("{} Local", icons::NETWORK))
+                            .selected_text(tr.format("{0} Local", &[icons::NETWORK.to_string()]))
                             .width(92.0)
                             .show_ui(ui, |ui| {
                                 if self.networks.is_empty() {
-                                    ui.label("No local networks found");
+                                    ui.label(tr.text("No local networks found"));
                                 }
                                 for network in &self.networks {
                                     if ui
@@ -763,7 +796,7 @@ impl ScoutApp {
                                 }
                                 ui.separator();
                                 if ui
-                                    .button(format!("{} Refresh", icons::ARROWS_CLOCKWISE))
+                                    .button(tr.format("{0} Refresh", &[icons::ARROWS_CLOCKWISE.to_string()]))
                                     .clicked()
                                 {
                                     self.networks = network::local_networks();
@@ -774,7 +807,7 @@ impl ScoutApp {
                         if ui
                             .add_enabled(
                                 !self.stopping,
-                                egui::Button::new(format!("{} Stop", icons::STOP))
+                                egui::Button::new(tr.format("{0} Stop", &[icons::STOP.to_string()]))
                                     .min_size(egui::vec2(115.0, 32.0)),
                             )
                             .clicked()
@@ -786,7 +819,7 @@ impl ScoutApp {
                     } else if ui
                         .add_enabled(!self.workflow.busy(),
                             egui::Button::new(
-                                RichText::new(format!("{} Start scan", icons::PLAY))
+                                RichText::new(tr.format("{0} Start scan", &[icons::PLAY.to_string()]))
                                     .color(Color32::WHITE),
                             )
                             .fill(GREEN)
@@ -798,7 +831,7 @@ impl ScoutApp {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("TCP ports");
+                    ui.label(tr.text("TCP ports"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.settings.ports)
                             .id(egui::Id::new("tcp_ports"))
@@ -812,34 +845,34 @@ impl ScoutApp {
                                 PORT_PRESETS
                                     .iter()
                                     .find(|(_, ports)| *ports == self.settings.ports.trim())
-                                    .map(|(name, _)| *name)
-                                    .unwrap_or("Custom"),
+                                    .map(|(name, _)| tr.text(name))
+                                    .unwrap_or(tr.text("Custom")),
                             )
                             .width(100.0)
                             .show_ui(ui, |ui| {
                                 for (name, ports) in PORT_PRESETS {
-                                    let preset = ui.button(name);
+                                    let preset = ui.button(tr.text(name));
                                     let preset = if name == "All TCP" {
-                                        preset.on_hover_text("All 65,535 TCP ports per address. Large ranges can take minutes or longer; concurrent connections remain bounded.")
+                                        preset.on_hover_text(tr.text("All 65,535 TCP ports per address. Large ranges can take minutes or longer; concurrent connections remain bounded."))
                                     } else { preset };
                                     if preset.clicked() {
                                         self.settings.ports = ports.into();
                                         if name == "Inventory" {
                                             self.fetchers_draft =
-                                                FetcherDraft::new(fetchers::inventory());
+                                                FetcherDraft::new(fetchers::inventory().into_iter().filter(|&fetcher| fetcher_supported(fetcher)).collect());
                                             self.apply_fetchers();
                                         }
                                     }
                                 }
                                 ui.separator();
                                 if ui
-                                    .button(format!("{} Custom...", icons::PENCIL_SIMPLE))
+                                    .button(tr.format("{0} Custom...", &[icons::PENCIL_SIMPLE.to_string()]))
                                     .clicked()
                                 {
                                     self.edit_ports();
                                 }
                             });
-                        let edit = icon_button(ui, icons::PENCIL_SIMPLE, "Edit TCP ports");
+                        let edit = icon_button(ui, icons::PENCIL_SIMPLE, tr.text("Edit TCP ports"));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_port_buttons[0] = Some(edit.rect.center());
@@ -852,21 +885,20 @@ impl ScoutApp {
                         ui.label(
                             RichText::new(format!(
                                 "{} {}  /  {} ms",
-                                if self.settings.adaptive_concurrency { "Auto max" } else { "Workers" },
+                                if self.settings.adaptive_concurrency { tr.text("Auto max") } else { tr.text("Workers") },
                                 self.settings.workers, self.settings.timeout_ms
                             ))
                             .size(12.0)
                             .color(MUTED),
                         ).on_hover_text(if let Some(snapshot) = self.concurrency.filter(|_| self.scan.is_some()) {
-                            format!("Local host budget: {} / {}\nRouted TCP budget: {} / {}\n{} independent interface/next-hop paths\nSlowest path pacing: up to 8 starts every {} ms",
-                                snapshot.local_workers, snapshot.max_workers, snapshot.routed_tcp, snapshot.routed_tcp_max, snapshot.active_paths, snapshot.routed_interval_ms)
+                            tr.format("Local host budget: {0} / {1} | Routed TCP budget: {2} / {3} | {4} independent interface/next-hop paths | Slowest path pacing: up to 8 starts every {5} ms", &[format!("{}", snapshot.local_workers), format!("{}", snapshot.max_workers), format!("{}", snapshot.routed_tcp), format!("{}", snapshot.routed_tcp_max), format!("{}", snapshot.active_paths), format!("{}", snapshot.routed_interval_ms)])
                         } else { "Worker ceiling; routed traffic has separate connection and pacing limits.".into() });
                         let previous = self.settings.mode;
                         ui.add_enabled_ui(self.scan.is_none(), |ui| {
-                            let deep = ui.selectable_value(&mut self.settings.mode, ScanMode::Thorough, "Deep")
-                                .on_hover_text("Probe silent addresses for extra services; longer timeouts and discovery window.");
-                            let fast = ui.selectable_value(&mut self.settings.mode, ScanMode::Fast, "Fast")
-                                .on_hover_text("Enrich responding devices; bounded ARP waits and higher TCP concurrency. Slower devices may need Deep.");
+                            let deep = ui.selectable_value(&mut self.settings.mode, ScanMode::Thorough, tr.text("Deep"))
+                                .on_hover_text(tr.text("Probe silent addresses for extra services; longer timeouts and discovery window."));
+                            let fast = ui.selectable_value(&mut self.settings.mode, ScanMode::Fast, tr.text("Fast"))
+                                .on_hover_text(tr.text("Enrich responding devices; bounded ARP waits and higher TCP concurrency. Slower devices may need Deep."));
                             #[cfg(feature = "gui-smoke")]
                             { self.smoke_mode_buttons = [Some(fast.rect.center()), Some(deep.rect.center())]; }
                             let _ = (deep, fast);
@@ -879,35 +911,36 @@ impl ScoutApp {
                 ui.horizontal(|ui| {
                     let mut enabled = self.udp_enabled();
                     let toggle = ui.add_enabled(self.scan.is_none(), egui::Checkbox::new(&mut enabled, "UDP"))
-                        .on_hover_text("Optional UDP ports and DNS/NTP/SNMP fetchers. Timeouts mean open or filtered, not closed.");
+                        .on_hover_text(tr.text("Optional UDP ports and DNS/NTP/SNMP fetchers. Timeouts mean open or filtered, not closed."));
                     #[cfg(feature = "gui-smoke")]
                     { self.smoke_udp_button = Some(toggle.rect.center()); }
                     if toggle.changed() {
                         self.set_udp_enabled(enabled);
                     }
-                    ui.label("Ports");
+                    ui.label(tr.text("Ports"));
                     ui.add(egui::TextEdit::singleline(&mut self.settings.udp_ports)
                         .id(egui::Id::new("udp_ports")).desired_width(280.0)
                         .font(egui::TextStyle::Monospace).hint_text("53,123,161"));
                     egui::ComboBox::from_id_salt("udp_presets").width(100.0)
                         .selected_text(match self.settings.udp_ports.trim() {
-                            udp::COMMON_PORTS => "Common", "1-65535" => "All UDP", "" => "Services", _ => "Custom"
+                            udp::COMMON_PORTS => tr.text("Common"), "1-65535" => tr.text("All UDP"), "" => tr.text("Services"), _ => tr.text("Custom")
                         }).show_ui(ui, |ui| {
-                            for (label, ports) in [("Common", udp::COMMON_PORTS), ("All UDP", "1-65535"), ("Services", "")] {
-                                if ui.button(label).on_hover_text(if label == "All UDP" {
-                                    "All UDP ports; usually much slower and less conclusive. Deep mode allows one retry."
-                                } else if label == "Services" {
-                                    "Only selected DNS/NTP/SNMP service fetchers; no additional port list."
+                            for (label, ports) in [(tr.text("Common"), udp::COMMON_PORTS), (tr.text("All UDP"), "1-65535"), (tr.text("Services"), "")] {
+                                if ui.button(label).on_hover_text(if label == tr.text("All UDP") {
+                                    tr.text("All UDP ports; usually much slower and less conclusive. Deep mode allows one retry.")
+                                } else if label == tr.text("Services") {
+                                    tr.text("Only selected DNS/NTP/SNMP service fetchers; no additional port list.")
                                 } else { label }).clicked() { self.settings.udp_ports = ports.into(); }
                             }
-                            if ui.button(format!("{} Custom...", icons::PENCIL_SIMPLE)).clicked() { self.edit_udp_ports(); }
+                            if ui.button(tr.format("{0} Custom...", &[icons::PENCIL_SIMPLE.to_string()])).clicked() { self.edit_udp_ports(); }
                         });
-                    if icon_button(ui, icons::PENCIL_SIMPLE, "Edit UDP ports").clicked() { self.edit_udp_ports(); }
+                    if icon_button(ui, icons::PENCIL_SIMPLE, tr.text("Edit UDP ports")).clicked() { self.edit_udp_ports(); }
                 });
             });
     }
 
     fn summary(&self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         let vertical_margin = if ctx.content_rect().height() < 600.0 {
             8
         } else {
@@ -927,25 +960,25 @@ impl ScoutApp {
                 ui.columns(4, |columns| {
                     metric(
                         &mut columns[0],
-                        "SCANNED",
+                        tr.text("SCANNED"),
                         &format!("{} / {}", self.checked, self.total),
                         None,
                     );
                     metric(
                         &mut columns[1],
-                        "ALIVE",
+                        tr.text("ALIVE"),
                         &self.alive.to_string(),
                         Some(GREEN),
                     );
                     metric(
                         &mut columns[2],
-                        "WITH OPEN PORTS",
+                        tr.text("WITH OPEN PORTS"),
                         &self.with_ports.to_string(),
                         Some(BLUE),
                     );
                     metric(
                         &mut columns[3],
-                        "ELAPSED",
+                        tr.text("ELAPSED"),
                         &format_duration(self.current_elapsed()),
                         None,
                     );
@@ -970,6 +1003,8 @@ impl ScoutApp {
     }
 
     fn status_bar(&self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
+        let message = self.message.render(tr);
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.scan.is_some() {
@@ -978,17 +1013,19 @@ impl ScoutApp {
                 let width = (ui.available_width() - 210.0).max(80.0);
                 ui.add_sized(
                     [width, 20.0],
-                    egui::Label::new(RichText::new(&self.message).size(12.0))
+                    egui::Label::new(RichText::new(&message).size(12.0))
                         .truncate()
                         .sense(egui::Sense::hover()),
                 )
-                .on_hover_text(&self.message);
+                .on_hover_text(&message);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
-                        RichText::new(format!(
-                            "{} shown  /  {} results",
-                            self.visible.len(),
-                            self.hosts.len()
+                        RichText::new(tr.format(
+                            "{0} shown  /  {1} results",
+                            &[
+                                format!("{}", self.visible.len()),
+                                format!("{}", self.hosts.len()),
+                            ],
                         ))
                         .size(12.0)
                         .color(MUTED),
@@ -999,6 +1036,7 @@ impl ScoutApp {
     }
 
     fn details(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         let host = self
             .selected
             .and_then(|ip| self.hosts.iter().find(|host| host.ip == ip));
@@ -1011,9 +1049,9 @@ impl ScoutApp {
                 .show(ctx, |ui| {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Host details").strong());
+                        ui.label(RichText::new(tr.text("Host details")).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if icon_button(ui, icons::X, "Close details").clicked() {
+                            if icon_button(ui, icons::X, tr.text("Close details")).clicked() {
                                 self.selected = None;
                             }
                         });
@@ -1030,36 +1068,41 @@ impl ScoutApp {
                                 .strong(),
                         );
                         ui.label(
-                            RichText::new(host.status.label()).color(status_color(host.status)),
+                            RichText::new(tr.text(host.status.label()))
+                                .color(status_color(host.status)),
                         );
                         ui.add_space(8.0);
                         detail(
                             ui,
-                            "Host discovery",
+                            tr.text("Host discovery"),
                             if host.discovery_complete() {
-                                "Complete"
+                                tr.text("Complete")
                             } else {
-                                "Incomplete"
+                                tr.text("Incomplete")
                             },
                         );
-                        detail(ui, "Hostname", &host.hostname);
-                        detail(ui, "Ping", &ping_text(host.ping_ms));
-                        detail(ui, "MAC address", &host.mac);
-                        detail(ui, "Manufacturer", &host.vendor);
+                        detail(ui, tr.text("Hostname"), &host.hostname);
+                        detail(ui, tr.text("Ping"), &ping_text(host.ping_ms));
+                        detail(ui, tr.text("MAC address"), &host.mac);
+                        detail(ui, tr.text("Manufacturer"), &host.vendor);
                         if host.vendor.is_empty() {
-                            detail(ui, "Probable brand", &host.probable_brand);
+                            detail(ui, tr.text("Probable brand"), &host.probable_brand);
                         }
                         detail(
                             ui,
-                            "ARP response",
+                            tr.text("ARP response"),
                             if host.arp_response {
-                                "Yes"
+                                tr.text("Yes")
                             } else {
-                                "Not tested / no response"
+                                tr.text("Not tested / no response")
                             },
                         );
-                        detail(ui, "Open TCP ports", &ports_text(&host.open_ports));
-                        detail(ui, "Refused TCP ports", &host.refused_ports.to_string());
+                        detail(ui, tr.text("Open TCP ports"), &ports_text(&host.open_ports));
+                        detail(
+                            ui,
+                            tr.text("Refused TCP ports"),
+                            &host.refused_ports.to_string(),
+                        );
                         for fetcher in [
                             Fetcher::Ttl,
                             Fetcher::PacketLoss,
@@ -1085,30 +1128,32 @@ impl ScoutApp {
                             Fetcher::NtpInfo,
                             Fetcher::SnmpInfo,
                         ] {
-                            let value = fetcher.value(host);
+                            let value = fetcher_display_value(tr, fetcher, host);
                             if !value.is_empty() {
-                                detail(ui, fetcher.label(), &value);
+                                detail(ui, tr.text(fetcher.label()), &value);
                             }
                         }
                         if host.extra.packet_loss.is_some() {
                             detail(
                                 ui,
-                                "ICMP replies / samples",
+                                tr.text("ICMP replies / samples"),
                                 &format!("{} / {}", host.extra.icmp_received, host.extra.icmp_sent),
                             );
                         }
                         if !host.notes.is_empty() {
-                            detail(ui, "Notes", &host.notes);
+                            detail(ui, tr.text("Notes"), &host.notes);
                         }
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if icon_button(ui, icons::COPY, "Copy host details").clicked() {
+                            if icon_button(ui, icons::COPY, tr.text("Copy host details")).clicked()
+                            {
                                 ctx.copy_text(host_text(host));
                             }
                             if (!host.extra.web.is_empty()
                                 || host.open_ports.contains(&443)
                                 || host.open_ports.contains(&80))
-                                && icon_button(ui, icons::GLOBE, "Open host web page").clicked()
+                                && icon_button(ui, icons::GLOBE, tr.text("Open host web page"))
+                                    .clicked()
                             {
                                 let scheme = if host.open_ports.contains(&443) {
                                     "https"
@@ -1130,15 +1175,16 @@ impl ScoutApp {
     }
 
     fn results(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin::same(18)))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     for (filter, label) in [
-                        (Filter::All, "All hosts"),
-                        (Filter::Alive, "Alive"),
-                        (Filter::OpenPorts, "Open ports"),
-                        (Filter::NoResponse, "No response"),
+                        (Filter::All, tr.text("All hosts")),
+                        (Filter::Alive, tr.text("Alive")),
+                        (Filter::OpenPorts, tr.text("Open ports")),
+                        (Filter::NoResponse, tr.text("No response")),
                     ] {
                         if ui
                             .selectable_value(&mut self.filter, filter, label)
@@ -1158,7 +1204,7 @@ impl ScoutApp {
                         .add(
                             egui::TextEdit::singleline(&mut self.query)
                                 .desired_width((ui.available_width() - 255.0).max(100.0))
-                                .hint_text("Filter hosts"),
+                                .hint_text(tr.text("Filter hosts")),
                         )
                         .changed()
                     {
@@ -1166,11 +1212,15 @@ impl ScoutApp {
                     }
                     self.rebuild_visible();
                     for (column, label, tooltip) in [
-                        (AddressColumn::Ip, "IP", "Copy visible IP addresses"),
+                        (
+                            AddressColumn::Ip,
+                            "IP",
+                            tr.text("Copy visible IP addresses"),
+                        ),
                         (
                             AddressColumn::Mac,
                             "MAC",
-                            "Copy visible MAC addresses (skip missing values)",
+                            tr.text("Copy visible MAC addresses (skip missing values)"),
                         ),
                     ] {
                         let feedback_id = egui::Id::new(("copy_visible", column));
@@ -1203,11 +1253,13 @@ impl ScoutApp {
                         if copy.clicked() {
                             let text =
                                 address_list(self.visible.iter().map(|&i| &self.hosts[i]), column);
-                            self.message =
-                                format!("Copied {} {label} addresses", text.lines().count());
+                            self.message = Message::new(
+                                "Copied {0} {1} addresses",
+                                vec![text.lines().count().to_string(), label.to_owned()],
+                            );
                             copy_with_feedback(ctx, feedback_id, text);
                         }
-                        show_copy_confirmation(&copy, feedback_id);
+                        show_copy_confirmation(&copy, feedback_id, tr);
                     }
                     ui.add_enabled_ui(
                         !self.hosts.is_empty() && self.export_result.is_none(),
@@ -1215,7 +1267,7 @@ impl ScoutApp {
                             if icon_button(
                                 ui,
                                 icons::DOWNLOAD_SIMPLE,
-                                "Export visible results to CSV",
+                                tr.text("Export visible results to CSV"),
                             )
                             .clicked()
                             {
@@ -1227,7 +1279,9 @@ impl ScoutApp {
                     ui.add_enabled_ui(
                         self.scan.is_none() && !self.workflow.busy() && !self.hosts.is_empty(),
                         |ui| {
-                            if icon_button(ui, icons::TRASH, "Clear scan results").clicked() {
+                            if icon_button(ui, icons::TRASH, tr.text("Clear scan results"))
+                                .clicked()
+                            {
                                 self.workflow.clear_current();
                                 self.hosts.clear();
                                 self.host_positions.clear();
@@ -1250,14 +1304,14 @@ impl ScoutApp {
                 });
                 if let Some(error) = self.error.clone() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(RED, error);
-                        if icon_button(ui, icons::X, "Dismiss error").clicked() {
+                        ui.colored_label(RED, tr.error(&error));
+                        if icon_button(ui, icons::X, tr.text("Dismiss error")).clicked() {
                             self.error = None;
                         }
                     });
                 }
                 for warning in &self.warnings {
-                    ui.colored_label(Color32::from_rgb(170, 119, 17), warning);
+                    ui.colored_label(Color32::from_rgb(170, 119, 17), tr.text(warning));
                 }
                 ui.add_space(4.0);
                 ui.separator();
@@ -1267,14 +1321,18 @@ impl ScoutApp {
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(icons::NETWORK).size(44.0).color(MUTED));
                         ui.add_space(8.0);
-                        ui.label(RichText::new("No scan results").size(18.0).strong());
+                        ui.label(
+                            RichText::new(tr.text("No scan results"))
+                                .size(18.0)
+                                .strong(),
+                        );
                     });
                 } else if self.visible.is_empty() {
                     ui.add_space(25.0);
                     ui.label(if self.scan.is_some() && self.hosts.is_empty() {
-                        "Scanning..."
+                        tr.text("Scanning...")
                     } else {
-                        "No matching hosts"
+                        tr.text("No matching hosts")
                     });
                 } else {
                     self.table(ui, ctx);
@@ -1283,12 +1341,16 @@ impl ScoutApp {
     }
 
     fn table(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         let fetchers = self.selected_fetchers().to_vec();
-        let mut headers = vec![(Sort::Ip, "IP address"), (Sort::Status, "Status")];
+        let mut headers = vec![
+            (Sort::Ip, tr.text("IP address")),
+            (Sort::Status, tr.text("Status")),
+        ];
         headers.extend(
             fetchers
                 .iter()
-                .map(|fetcher| (fetcher_sort(*fetcher), fetcher.label())),
+                .map(|fetcher| (fetcher_sort(*fetcher), tr.text(fetcher.label()))),
         );
         let content_width = 310.0
             + fetchers
@@ -1368,8 +1430,9 @@ impl ScoutApp {
                                 ui,
                                 ctx,
                                 &host.ip.to_string(),
-                                "Copy IP address",
+                                tr.text("Copy IP address"),
                                 egui::Id::new(("copy_address", host.ip, AddressColumn::Ip)),
+                                tr,
                             );
                             #[cfg(feature = "gui-smoke")]
                             if index == 0 {
@@ -1386,7 +1449,10 @@ impl ScoutApp {
                                 3.5,
                                 status_color(host.status),
                             );
-                            ui.colored_label(status_color(host.status), host.status.label());
+                            ui.colored_label(
+                                status_color(host.status),
+                                tr.text(host.status.label()),
+                            );
                         });
                         for fetcher in &fetchers {
                             row.col(|ui| match fetcher {
@@ -1404,12 +1470,13 @@ impl ScoutApp {
                                         ui,
                                         ctx,
                                         &host.mac,
-                                        "Copy MAC address",
+                                        tr.text("Copy MAC address"),
                                         egui::Id::new((
                                             "copy_address",
                                             host.ip,
                                             AddressColumn::Mac,
                                         )),
+                                        tr,
                                     );
                                     #[cfg(feature = "gui-smoke")]
                                     if index == 0 {
@@ -1418,7 +1485,7 @@ impl ScoutApp {
                                     #[cfg(not(feature = "gui-smoke"))]
                                     let _ = copy;
                                 }
-                                fetcher => cell(ui, &fetcher.value(host)),
+                                fetcher => cell(ui, &fetcher_display_value(tr, *fetcher, host)),
                             });
                         }
                         let response = row.response();
@@ -1437,7 +1504,7 @@ impl ScoutApp {
                             if ui
                                 .add_enabled(
                                     self.scan.is_none(),
-                                    egui::Button::new("Rescan selected devices"),
+                                    egui::Button::new(tr.text("Rescan selected devices")),
                                 )
                                 .clicked()
                             {
@@ -1449,7 +1516,9 @@ impl ScoutApp {
                                 ui.close();
                             }
                             if ui
-                                .button(format!("{} Copy IP address", icons::COPY))
+                                .button(
+                                    tr.format("{0} Copy IP address", &[icons::COPY.to_string()]),
+                                )
                                 .clicked()
                             {
                                 ctx.copy_text(host.ip.to_string());
@@ -1458,7 +1527,10 @@ impl ScoutApp {
                             if ui
                                 .add_enabled(
                                     !host.mac.is_empty(),
-                                    egui::Button::new(format!("{} Copy MAC address", icons::COPY)),
+                                    egui::Button::new(tr.format(
+                                        "{0} Copy MAC address",
+                                        &[icons::COPY.to_string()],
+                                    )),
                                 )
                                 .clicked()
                             {
@@ -1466,7 +1538,9 @@ impl ScoutApp {
                                 ui.close();
                             }
                             if ui
-                                .button(format!("{} Copy host details", icons::COPY))
+                                .button(
+                                    tr.format("{0} Copy host details", &[icons::COPY.to_string()]),
+                                )
                                 .clicked()
                             {
                                 ctx.copy_text(host_text(host));
@@ -1501,10 +1575,12 @@ impl ScoutApp {
     }
 
     fn fetchers_window(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         let mut open = self.show_fetchers;
         let mut apply = false;
         let mut cancel = false;
-        egui::Window::new("Fetchers")
+        egui::Window::new(tr.text("Fetchers"))
+            .id(egui::Id::new("fetchers_window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1513,7 +1589,7 @@ impl ScoutApp {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.set_width(216.0);
-                        ui.label(RichText::new("Selected fetchers").strong());
+                        ui.label(RichText::new(tr.text("Selected fetchers")).strong());
                         egui::Frame::group(ui.style())
                             .corner_radius(4)
                             .show(ui, |ui| {
@@ -1529,9 +1605,9 @@ impl ScoutApp {
                                                 .selectable_value(
                                                     &mut self.fetchers_draft.selected_row,
                                                     Some(fetcher),
-                                                    fetcher.label(),
+                                                    tr.text(fetcher.label()),
                                                 )
-                                                .on_hover_text(fetcher.help());
+                                                .on_hover_text(tr.text(fetcher.help()));
                                             if self.fetcher_scroll_selected
                                                 && self.fetchers_draft.selected_row == Some(fetcher)
                                             {
@@ -1550,7 +1626,7 @@ impl ScoutApp {
                                 index.is_some_and(|i| i > 0),
                                 egui::Button::new(icons::ARROW_UP).min_size(egui::vec2(32.0, 32.0)),
                             )
-                            .on_hover_text("Move selected fetcher up");
+                            .on_hover_text(tr.text("Move selected fetcher up"));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_fetcher_buttons[3] = Some(up.rect.center());
@@ -1565,7 +1641,7 @@ impl ScoutApp {
                                 egui::Button::new(icons::ARROW_DOWN)
                                     .min_size(egui::vec2(32.0, 32.0)),
                             )
-                            .on_hover_text("Move selected fetcher down")
+                            .on_hover_text(tr.text("Move selected fetcher down"))
                             .clicked()
                         {
                             self.fetchers_draft.move_selected(1);
@@ -1578,7 +1654,7 @@ impl ScoutApp {
                                 egui::Button::new(icons::ARROW_LEFT)
                                     .min_size(egui::vec2(32.0, 32.0)),
                             )
-                            .on_hover_text("Add available fetcher");
+                            .on_hover_text(tr.text("Add available fetcher"));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_fetcher_buttons[2] = Some(add.rect.center());
@@ -1593,7 +1669,7 @@ impl ScoutApp {
                                 egui::Button::new(icons::ARROW_RIGHT)
                                     .min_size(egui::vec2(32.0, 32.0)),
                             )
-                            .on_hover_text("Remove selected fetcher");
+                            .on_hover_text(tr.text("Remove selected fetcher"));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_fetcher_buttons[4] = Some(remove.rect.center());
@@ -1605,7 +1681,7 @@ impl ScoutApp {
                     });
                     ui.vertical(|ui| {
                         ui.set_width(216.0);
-                        ui.label(RichText::new("Available fetchers").strong());
+                        ui.label(RichText::new(tr.text("Available fetchers")).strong());
                         egui::Frame::group(ui.style())
                             .corner_radius(4)
                             .show(ui, |ui| {
@@ -1617,13 +1693,13 @@ impl ScoutApp {
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         for fetcher in self.fetchers_draft.available() {
-                                            let row = ui
+                                            let row = ui.add_enabled_ui(fetcher_supported(fetcher), |ui| ui
                                                 .selectable_value(
                                                     &mut self.fetchers_draft.available_row,
                                                     Some(fetcher),
-                                                    fetcher.label(),
+                                                    tr.text(fetcher.label()),
                                                 )
-                                                .on_hover_text(fetcher.help());
+                                                .on_hover_text(tr.text(fetcher.help()))).inner;
                                             #[cfg(feature = "gui-smoke")]
                                             if fetcher == Fetcher::ArpResponse {
                                                 self.smoke_fetcher_buttons[1] =
@@ -1639,28 +1715,28 @@ impl ScoutApp {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let defaults =
-                        ui.button(format!("{} Defaults", icons::ARROW_COUNTER_CLOCKWISE));
+                        ui.button(tr.format("{0} Defaults", &[icons::ARROW_COUNTER_CLOCKWISE.to_string()]));
                     #[cfg(feature = "gui-smoke")]
                     {
                         self.smoke_fetcher_buttons[7] = Some(defaults.rect.center());
                     }
                     if defaults.clicked() {
-                        self.fetchers_draft = FetcherDraft::new(fetchers::defaults());
+                        self.fetchers_draft = FetcherDraft::new(fetchers::defaults().into_iter().filter(|&fetcher| fetcher_supported(fetcher)).collect());
                     }
-                    let inventory = ui.button(format!("{} Inventory", icons::LIST_CHECKS)).on_hover_text("Select inventory fetchers; keeps the current TCP port list. The Inventory TCP preset includes common device services.");
+                    let inventory = ui.button(tr.format("{0} Inventory", &[icons::LIST_CHECKS.to_string()])).on_hover_text(tr.text("Select inventory fetchers; keeps the current TCP port list. The Inventory TCP preset includes common device services."));
                     #[cfg(feature = "gui-smoke")]
                     { self.smoke_fetcher_buttons[8] = Some(inventory.rect.center()); }
                     if inventory.clicked() {
-                        self.fetchers_draft = FetcherDraft::new(fetchers::inventory());
+                        self.fetchers_draft = FetcherDraft::new(fetchers::inventory().into_iter().filter(|&fetcher| fetcher_supported(fetcher)).collect());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let cancel_button = ui.button("Cancel");
+                        let cancel_button = ui.button(tr.text("Cancel"));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_fetcher_buttons[6] = Some(cancel_button.rect.center());
                         }
                         cancel = cancel_button.clicked();
-                        let apply_button = ui.button(format!("{} Apply", icons::CHECK));
+                        let apply_button = ui.button(tr.format("{0} Apply", &[icons::CHECK.to_string()]));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_fetcher_buttons[5] = Some(apply_button.rect.center());
@@ -1677,12 +1753,14 @@ impl ScoutApp {
     }
 
     fn windows(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         self.fetchers_window(ctx);
         let mut ports_open = self.show_ports_editor;
         let mut apply_ports = false;
         let mut cancel_ports = false;
         let protocol = if self.ports_are_udp { "UDP" } else { "TCP" };
-        egui::Window::new(format!("Custom {protocol} ports"))
+        egui::Window::new(tr.format("Custom {0} ports", &[protocol.to_owned()]))
+            .id(egui::Id::new("custom_ports_window"))
             .open(&mut ports_open)
             .collapsible(false)
             .resizable(false)
@@ -1690,7 +1768,11 @@ impl ScoutApp {
             .default_width(400.0)
             .show(ctx, |ui| {
                 ui.scope(|ui| {
-                    ui.label("TCP ports");
+                    ui.label(if self.ports_are_udp {
+                        tr.text("UDP ports")
+                    } else {
+                        tr.text("TCP ports")
+                    });
                     let editor = ui.add(
                         egui::TextEdit::singleline(&mut self.ports_draft)
                             .id(egui::Id::new("custom_ports_draft"))
@@ -1710,23 +1792,26 @@ impl ScoutApp {
                         self.ports_error = None;
                     }
                     if let Some(error) = &self.ports_error {
-                        ui.colored_label(RED, error);
+                        ui.colored_label(RED, tr.error(error));
                     }
                     if let Ok(ports) = parse_ports(&self.ports_draft) {
                         ui.label(if ports.is_empty() {
-                            format!("No {protocol} ports")
+                            tr.format("No {0} ports", &[protocol.to_string()])
                         } else {
-                            format!("{} {protocol} ports", ports.len())
+                            tr.format(
+                                "{0} {1} ports",
+                                &[format!("{}", ports.len()), protocol.to_string()],
+                            )
                         });
                     }
                     ui.horizontal(|ui| {
-                        let apply = ui.button(format!("{} Apply", icons::CHECK));
+                        let apply = ui.button(tr.format("{0} Apply", &[icons::CHECK.to_string()]));
                         #[cfg(feature = "gui-smoke")]
                         {
                             self.smoke_port_buttons[2] = Some(apply.rect.center());
                         }
                         apply_ports = apply.clicked();
-                        cancel_ports = ui.button("Cancel").clicked();
+                        cancel_ports = ui.button(tr.text("Cancel")).clicked();
                     });
                     apply_ports |= editor.lost_focus()
                         && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -1738,16 +1823,52 @@ impl ScoutApp {
             self.apply_ports();
         }
         let mut edit_fetchers = false;
-        egui::Window::new("Scan settings")
+        egui::Window::new(tr.text("Scan settings"))
+            .id(egui::Id::new("scan_settings"))
             .open(&mut self.show_settings)
             .collapsible(false)
             .resizable(false)
+            .vscroll(true)
+            .max_height((ctx.content_rect().height() - 60.0).max(240.0))
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr.text("Interface language"));
+                    let previous = self.language;
+                    let picker = egui::ComboBox::from_id_salt("interface_language")
+                        .width(205.0)
+                        .selected_text(match self.language {
+                            Language::Auto => tr.text("Automatic (system)"),
+                            Language::English => "English",
+                            Language::French => "Français",
+                        })
+                        .show_ui(ui, |ui| {
+                            let automatic = ui.selectable_value(&mut self.language, Language::Auto, tr.text("Automatic (system)"))
+                                .on_hover_text(tr.text("Follows the system display language. Unsupported languages use English."));
+                            let english = ui.selectable_value(&mut self.language, Language::English, "English");
+                            let french = ui.selectable_value(&mut self.language, Language::French, "Français");
+                            #[cfg(feature = "gui-smoke")]
+                            {
+                                self.smoke_language_buttons[1] = Some(automatic.rect.center());
+                                self.smoke_language_buttons[2] = Some(english.rect.center());
+                                self.smoke_language_buttons[3] = Some(french.rect.center());
+                            }
+                            #[cfg(not(feature = "gui-smoke"))]
+                            let _ = (automatic, english, french);
+                        });
+                    #[cfg(feature = "gui-smoke")]
+                    { self.smoke_language_buttons[0] = Some(picker.response.rect.center()); }
+                    #[cfg(not(feature = "gui-smoke"))]
+                    let _ = picker;
+                    if self.language != previous {
+                        ctx.request_repaint();
+                    }
+                });
+                ui.separator();
                 ui.add_enabled_ui(self.scan.is_none(), |ui| {
                     egui::Grid::new("settings_grid")
                         .spacing([24.0, 16.0])
                         .show(ui, |ui| {
-                            ui.label("Probe timeout");
+                            ui.label(tr.text("Probe timeout"));
                             ui.add(
                                 egui::DragValue::new(&mut self.settings.timeout_ms)
                                     .range(100..=5000)
@@ -1755,61 +1876,67 @@ impl ScoutApp {
                                     .suffix(" ms"),
                             );
                             ui.end_row();
-                            ui.label("Max workers");
+                            ui.label(tr.text("Max workers"));
                             ui.add(egui::DragValue::new(&mut self.settings.workers).range(1..=scanner::MAX_HOST_WORKERS));
                             ui.end_row();
-                            ui.label("Scan adaptation");
-                            ui.checkbox(&mut self.settings.adaptive_concurrency, "Adaptive")
-                                .on_hover_text("Adjusts workers and routed TCP/ICMP pacing independently for each interface/next hop. Learns per-host deadlines from latency and jitter: 50 ms minimum on LAN, 100 ms routed, up to 4× the initial timeout (maximum 5 seconds). Unmeasured hosts keep the initial timeout.");
+                            ui.label(tr.text("Scan adaptation"));
+                            ui.checkbox(&mut self.settings.adaptive_concurrency, tr.text("Adaptive"))
+                                .on_hover_text(tr.text("Adjusts workers and routed TCP/ICMP pacing independently for each interface/next hop. Learns per-host deadlines from latency and jitter: 50 ms minimum on LAN, 100 ms routed, up to 4× the initial timeout (maximum 5 seconds). Unmeasured hosts keep the initial timeout."));
                             ui.end_row();
-                            ui.label("ICMP samples");
+                            ui.label(tr.text("ICMP samples"));
                             ui.add(egui::DragValue::new(&mut self.settings.icmp_samples).range(1..=10))
-                                .on_hover_text("Used only with Packet loss selected. Other scans send one ping per host.");
+                                .on_hover_text(tr.text("Used only with Packet loss selected. Other scans send one ping per host."));
                             ui.end_row();
-                            ui.label("Fetchers");
+                            ui.label(tr.text("Fetchers"));
                             edit_fetchers = ui
-                                .button(format!("{} Configure", icons::LIST_CHECKS))
+                                .button(tr.format("{0} Configure", &[icons::LIST_CHECKS.to_string()]))
                                 .clicked();
                             ui.end_row();
-                            ui.label("Discovery window");
+                            ui.label(tr.text("Discovery window"));
                             ui.add(egui::DragValue::new(&mut self.settings.discovery_seconds).range(1..=120).suffix(" s"))
-                                .on_hover_text("Shared local discovery time per scan, only when selected. MNDP advertisements are periodic; allow 30-120 seconds when needed. UPnP descriptions add at most two seconds.");
+                                .on_hover_text(tr.text("Shared local discovery time per scan, only when selected. MNDP advertisements are periodic; allow 30-120 seconds when needed. UPnP descriptions add at most two seconds."));
                             ui.end_row();
-                            ui.label("HTTPS web probes");
-                            ui.checkbox(&mut self.settings.allow_unverified_tls, "Allow unverified TLS")
-                                .on_hover_text("Off by default. Enables detection on self-signed HTTPS services; these results are labeled TLS unverified.");
+                            ui.label(tr.text("HTTPS web probes"));
+                            ui.checkbox(&mut self.settings.allow_unverified_tls, tr.text("Allow unverified TLS"))
+                                .on_hover_text(tr.text("Off by default. Enables detection on self-signed HTTPS services; these results are labeled TLS unverified."));
                             ui.end_row();
-                            ui.label("Local discovery");
-                            ui.checkbox(
-                                &mut self.settings.discover_arp,
-                                "Confirm ARP-only devices",
-                            );
+                            ui.label(tr.text("Local discovery"));
+                            ui.add_enabled(network::ARP_SUPPORTED, egui::Checkbox::new(
+                                &mut self.settings.discover_arp, tr.text("Confirm ARP-only devices")));
                             ui.end_row();
-                            ui.label("SNMPv2c community");
+                            ui.label(tr.text("SNMPv2c community"));
                             ui.add(egui::TextEdit::singleline(&mut self.settings.snmp_community)
                                 .password(true).char_limit(255).desired_width(230.0))
-                                .on_hover_text("Optional and not saved. Sent unencrypted for read-only SNMPv2c GET when SNMP info or UDP 161 is selected. No default guessing or writes.");
+                                .on_hover_text(tr.text("Optional and not saved. Sent unencrypted for read-only SNMPv2c GET when SNMP info or UDP 161 is selected. No default guessing or writes."));
                             ui.end_row();
                         });
                 });
+                if !network::ARP_SUPPORTED || !network::ROUTE_SUPPORTED {
+                    ui.small(tr.text("Initial Linux support: ARP/MAC discovery and per-interface route inspection are not yet available."));
+                }
             });
         if edit_fetchers {
             self.show_settings = false;
             self.edit_fetchers();
         }
-        egui::Window::new("About IP Scout")
+        egui::Window::new(tr.text("About IP Scout"))
+            .id(egui::Id::new("about_window"))
             .open(&mut self.show_about)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.heading("IP Scout");
-                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                ui.label(format!("License: {}", env!("CARGO_PKG_LICENSE")));
-                ui.label("An independent scanner inspired by Angry IP Scanner.");
-                ui.label("Rust / egui / Windows ICMP");
+                ui.label(tr.format("Version {0}", &[env!("CARGO_PKG_VERSION").to_string()]));
+                ui.label(tr.format("License: {0}", &[env!("CARGO_PKG_LICENSE").to_string()]));
+                ui.label(tr.text("An independent scanner inspired by Angry IP Scanner."));
+                ui.label(if cfg!(target_os = "linux") {
+                    "Rust / egui / Linux ICMP"
+                } else {
+                    "Rust / egui / Windows ICMP"
+                });
                 ui.separator();
                 ui.hyperlink_to(
-                    "Manufacturer data: IEEE Registration Authority",
+                    tr.text("Manufacturer data: IEEE Registration Authority"),
                     "https://standards-oui.ieee.org/oui/oui.csv",
                 );
             });
@@ -1822,6 +1949,84 @@ impl ScoutApp {
     reason = "These helpers are consumed by the GUI smoke example"
 )]
 impl ScoutApp {
+    pub fn smoke_language_setup(&mut self, ctx: &egui::Context) {
+        self.language = Language::English;
+        self.settings = Settings::default();
+        self.settings.normalize_fetchers();
+        self.settings.target = "192.0.2.0/24".into();
+        let mut host = smoke_host("192.0.2.1", "02:11:22:33:44:55");
+        host.hostname = "café-router-{0}".into();
+        host.vendor = "Example Networks".into();
+        host.open_ports = vec![80, 443];
+        self.hosts = vec![host];
+        self.host_positions = HashMap::from([(self.hosts[0].ip, 0)]);
+        self.total = 254;
+        self.checked = 254;
+        self.alive = 1;
+        self.with_ports = 1;
+        self.scan_complete = true;
+        self.message = "Scan complete".into();
+        self.show_settings = true;
+        self.show_about = false;
+        self.show_fetchers = false;
+        self.view.clear();
+        self.dirty = true;
+        apply_theme(ctx, false);
+    }
+
+    pub fn smoke_language_layout(&mut self, stage: usize, ctx: &egui::Context) {
+        let small = stage >= 2;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(if small {
+            egui::vec2(820.0, 540.0)
+        } else {
+            egui::vec2(1180.0, 760.0)
+        }));
+        self.settings.dark = small;
+        apply_theme(ctx, small);
+        self.show_settings = stage != 3;
+        self.show_fetchers = stage == 3;
+        if stage == 3 {
+            self.edit_fetchers();
+        }
+        self.smoke_language_buttons = [None; 4];
+    }
+
+    pub fn smoke_language_click(&self, slot: usize) -> Option<Vec<egui::Event>> {
+        let pos = self.smoke_language_buttons[slot]?;
+        Some(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            },
+        ])
+    }
+
+    pub fn smoke_language_verify(&self, stage: usize) {
+        let expected = match stage {
+            0 | 4 => Language::English,
+            5 => Language::Auto,
+            _ => Language::French,
+        };
+        assert_eq!(
+            self.language, expected,
+            "the language picker did not select its option"
+        );
+        assert_eq!(self.hosts[0].hostname, "café-router-{0}");
+        assert_eq!(
+            self.message.render(self.language.resolve()),
+            self.language.resolve().text("Scan complete")
+        );
+    }
+
     pub fn smoke_stage(&mut self, stage: usize, port: u16, ctx: &egui::Context) {
         self.view.clear();
         match stage {
@@ -2678,6 +2883,7 @@ impl eframe::App for ScoutApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "language", &self.language);
         eframe::set_value(storage, "settings", &self.settings);
         eframe::set_value(storage, "profiles", &self.workflow.profiles);
     }
@@ -2715,6 +2921,17 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
 fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
     ui.add(egui::Button::new(RichText::new(icon).size(19.0)).min_size(egui::vec2(32.0, 32.0)))
         .on_hover_text(tooltip)
+}
+
+fn fetcher_supported(fetcher: Fetcher) -> bool {
+    match fetcher {
+        Fetcher::MacAddress
+        | Fetcher::Manufacturer
+        | Fetcher::ProbableBrand
+        | Fetcher::ArpResponse => network::ARP_SUPPORTED,
+        Fetcher::NetworkPath => network::ROUTE_SUPPORTED,
+        _ => true,
+    }
 }
 
 fn fetcher_sort(fetcher: Fetcher) -> Sort {
@@ -2772,6 +2989,7 @@ fn address_cell(
     value: &str,
     tooltip: &str,
     feedback_id: egui::Id,
+    tr: Locale,
 ) -> egui::Response {
     ui.spacing_mut().item_spacing.x = 2.0;
     let width = (ui.available_width() - 26.0).max(0.0);
@@ -2798,7 +3016,7 @@ fn address_cell(
     if copy.clicked() {
         copy_with_feedback(ctx, feedback_id, value.to_owned());
     }
-    show_copy_confirmation(&copy, feedback_id);
+    show_copy_confirmation(&copy, feedback_id, tr);
     copy
 }
 
@@ -2821,7 +3039,7 @@ fn copy_confirmed(ctx: &egui::Context, button: egui::Id) -> bool {
         .is_some_and(|feedback| feedback.active_for(button, Instant::now()))
 }
 
-fn show_copy_confirmation(response: &egui::Response, button: egui::Id) {
+fn show_copy_confirmation(response: &egui::Response, button: egui::Id, tr: Locale) {
     let ctx = &response.ctx;
     if let Some(feedback) =
         ctx.data(|data| data.get_temp::<CopyFeedback>(egui::Id::new("clipboard_feedback")))
@@ -2830,7 +3048,9 @@ fn show_copy_confirmation(response: &egui::Response, button: egui::Id) {
         if feedback.active_for(button, now) && response.enabled() {
             ctx.request_repaint_after(feedback.expires_at.saturating_duration_since(now));
             egui::Tooltip::for_widget(response).width(90.0).show(|ui| {
-                ui.label(RichText::new(format!("{} Copied", icons::CHECK)).color(GREEN));
+                ui.label(
+                    RichText::new(format!("{} {}", icons::CHECK, tr.text("Copied"))).color(GREEN),
+                );
             });
         }
     }
@@ -2851,6 +3071,15 @@ fn smoke_host(ip: &str, mac: &str) -> HostResult {
         arp_response: true,
         probable_brand: String::new(),
         extra: Default::default(),
+    }
+}
+
+fn fetcher_display_value(tr: Locale, fetcher: Fetcher, host: &HostResult) -> String {
+    let value = fetcher.value(host);
+    if fetcher == Fetcher::ArpResponse {
+        tr.text(&value).to_owned()
+    } else {
+        value
     }
 }
 
@@ -2971,6 +3200,30 @@ mod clipboard_tests {
     use super::*;
 
     #[test]
+    fn runtime_logo_preserves_the_existing_256px_icon_pixels_and_alpha() {
+        let png = include_bytes!(concat!(env!("OUT_DIR"), "/runtime-logo.png"));
+        let icon = include_bytes!("../assets/ip-scout.ico");
+        let frames = u16::from_le_bytes(icon[4..6].try_into().unwrap()) as usize;
+        let frame = (0..frames)
+            .map(|index| &icon[6 + index * 16..22 + index * 16])
+            .find(|entry| entry[0] == 0 && entry[1] == 0)
+            .expect("256px ICO frame");
+        let size = u32::from_le_bytes(frame[8..12].try_into().unwrap()) as usize;
+        let offset = u32::from_le_bytes(frame[12..16].try_into().unwrap()) as usize;
+        assert_eq!(
+            png.as_slice(),
+            &icon[offset..offset + size],
+            "reuse the icon without re-encoding or quantizing it"
+        );
+        let image = image::load_from_memory(png).unwrap().to_rgba8();
+        assert_eq!(image.dimensions(), (256, 256));
+        assert!(image.pixels().any(|pixel| pixel[3] == 0));
+        assert!(image.pixels().any(|pixel| pixel[3] == 255));
+        assert!(image.pixels().any(|pixel| pixel[3] > 0 && pixel[3] < 255));
+        assert!(png.len() < include_bytes!("../assets/ip-scout-logo.png").len() / 10);
+    }
+
+    #[test]
     fn progressive_updates_replace_rows_and_keep_counters_correct() {
         let mut hosts = Vec::new();
         let mut positions = HashMap::new();
@@ -3045,7 +3298,10 @@ mod clipboard_tests {
         assert!(message.contains("54200/65534 checked"));
         assert!(message.contains("11334 unchecked"));
         assert!(message.contains("incomplete"));
-        assert_eq!(scan_finished_message(false, 65534, 65534), "Scan complete");
+        assert_eq!(
+            scan_finished_message(false, 65534, 65534).render(Locale::English),
+            "Scan complete"
+        );
     }
 
     #[test]

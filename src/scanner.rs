@@ -22,9 +22,11 @@ mod pipeline;
 mod probes;
 mod routes;
 
+#[cfg(all(test, windows))]
+use host::scan_host;
 use host::{confirm_host, enrich_host, scan_host_with_progress};
 #[cfg(test)]
-use host::{finish_host_discovery, merge_ping, scan_host};
+use host::{finish_host_discovery, merge_ping};
 #[cfg(test)]
 use hostname::first_name;
 use hostname::make_resolver;

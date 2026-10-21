@@ -1,7 +1,8 @@
 # IP Scout
 
-IP Scout is a native Windows 11 desktop application for scanning IPv4 networks
-and collecting device and service information.
+IP Scout is a native desktop application for scanning IPv4 networks and collecting
+device and service information. Windows 11 is supported; the initial Linux x64
+port supports X11 and Wayland with the platform limits described below.
 
 ## Download and run
 
@@ -63,6 +64,21 @@ recorded.
 TCP and UDP port fields accept lists and ranges, such as `22,80,443,8000-8010`.
 Scan settings control timeouts, concurrency, local discovery, and HTTPS policy.
 Changes to scanning options apply to the next scan.
+
+### Interface language
+
+Open **Scan settings** (the gear button), then **Interface language**, and choose
+**Automatic (system)**, **English**, or **Français**. The choice takes effect
+immediately, including during a scan, and is saved between launches. Automatic
+is the default for new and existing installations. It follows `LC_ALL`,
+`LC_MESSAGES`, or `LANG` when explicitly set; on Windows, neutral `C`/`POSIX`
+locales do not override the preferred Windows display languages. Unsupported
+languages fall back to English.
+
+Language is an application preference, separate from scan profiles. CSV column
+names and values, JSON scan histories, comparison data, and observed device
+names remain independent of the interface language. Technical details returned
+by probes, the engine or the operating system retain their original text.
 
 With **Adaptive** enabled in Scan settings, ICMP and TCP deadlines learn each
 host's latency and jitter independently. Unmeasured hosts keep the configured
@@ -131,6 +147,90 @@ shortcut icons. After changing the source logo PNG, run
 `.\scripts\create-icon.ps1` to regenerate its 16–256 pixel icon variants before
 building. The icon file is included in the repository; ordinary builds need no
 image conversion step.
+
+Builds generate compact embedded resources automatically in Cargo's `OUT_DIR`.
+The IEEE CSV snapshots remain the source of truth: every 24-, 28- and 36-bit
+assignment and organization name is stored in a compressed binary table, while
+unused registry/address columns are omitted. The table is decompressed once,
+on the first manufacturer lookup, and requires no network or external data file.
+The window icon and toolbar logo reuse the existing transparent 256-pixel PNG
+frame from `assets/ip-scout.ico`; the full-resolution source PNG stays available
+for future icon generation. Normal builds require only the existing Rust tools.
+
+To compare two builds using the same compiler and release options, keep the first
+executable before rebuilding, then run:
+
+```powershell
+python scripts/measure-size.py --before artifacts/size-baseline/ip-scout.exe --after target/x86_64-pc-windows-msvc/release/ip-scout.exe --output artifacts/size-comparison.json
+```
+
+The report includes exact byte counts and SHA-256 hashes, plus executable-only
+ZIP sizes with identical names, timestamps and compression settings. These ZIP
+measurements are independent of the release package and its documentation.
+
+To verify the language picker using native screenshots and simulated clicks,
+without network probes:
+
+```powershell
+cargo run --locked --example gui_smoke --features gui-smoke -- --language-only
+```
+
+Screenshots are written to `artifacts/i18n-*.png`.
+
+### Linux x64
+
+On Debian/Ubuntu, install Rust with rustup and the native build dependencies:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
+cargo run --release --locked
+```
+
+Use `bash scripts/package-linux.sh` to create a `.tar.gz` archive and a separate
+Linux SHA-256 checksum file in `dist/`. Extract it and run `./ip-scout` inside the
+package directory. It is a native GNU/Linux x64 binary using the system's glibc,
+OpenGL, X11/Wayland and libxkbcommon libraries, rather than a fully static or
+AppImage build. File dialogs use the desktop's XDG portal; install
+`xdg-desktop-portal` and its GNOME/KDE/GTK backend if the desktop does not already
+provide one.
+
+The initial port supports TCP/UDP probes, DNS names, native ICMP with latency and
+TTL, local IPv4 interface selection, service/device discovery, exports and scan
+histories. ICMP uses Linux ping sockets, without a raw-socket fallback or running
+the application as root. The user's group must be allowed by
+`net.ipv4.ping_group_range`; restricted systems report an ICMP error, while TCP
+and the other probes remain usable. No system network settings are changed by
+the application.
+
+Fresh ARP confirmation, MAC/manufacturer discovery from the neighbor table,
+per-interface route inspection and native NSS hostname fallback are not ported
+yet. DNS PTR lookup and ordinary local multicast discovery still work. New
+Linux preferences omit MAC/manufacturer collection and ARP confirmation, and
+unavailable collectors cannot be newly selected in the collector picker. Old
+profiles and histories remain readable, including their stored MAC, manufacturer
+and route values. Route-based pacing shares a conservative fallback budget.
+
+To exercise the native UI on a headless Linux machine:
+
+```sh
+sudo apt-get install -y xvfb xauth dbus-x11
+cargo build --locked --example gui_smoke --features gui-smoke
+LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=x11 dbus-run-session -- xvfb-run -a -s '-screen 0 1280x1024x24' env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET target/debug/examples/gui_smoke --language-only
+```
+
+### GitHub Actions
+
+`.github/workflows/build.yml` runs on pushes, pull requests and manual dispatch.
+Its Windows x64 and Linux x64 jobs check formatting, run Clippy and tests, build
+release packages with `--locked`, and upload their archives and SHA-256 checksums
+as workflow artifacts. Linux also runs the language-picker UI smoke test under
+Xvfb with software OpenGL and uploads its screenshots. No GitHub Release is
+published by this workflow, and no signing or publishing secret is required.
+
+Linux CI uses Ubuntu 22.04 to keep the build-host glibc baseline at 2.35; a locally
+built archive inherits the libc requirements of its own build environment.
+macOS, ARM64, AppImage and distro-specific installers are not included yet.
 
 ## License
 

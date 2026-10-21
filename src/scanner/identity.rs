@@ -1,6 +1,12 @@
 use super::{hostname::DnsResolver, model::*, probes::TcpProber};
 use crate::network;
-use std::{collections::HashMap, net::Ipv4Addr, sync::OnceLock, time::Duration};
+use std::{
+    collections::HashMap,
+    io::{self, Read},
+    net::Ipv4Addr,
+    sync::OnceLock,
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default, Clone)]
@@ -89,23 +95,48 @@ pub(super) fn is_alive(ping: Option<f64>, open: &[u16], refused: usize, arp: boo
 pub(super) fn vendors() -> &'static HashMap<(u8, u64), String> {
     static VENDORS: OnceLock<HashMap<(u8, u64), String>> = OnceLock::new();
     VENDORS.get_or_init(|| {
-        let mut table = HashMap::new();
-        for (bits, data) in [
-            (24, include_bytes!("../../assets/oui.csv").as_slice()),
-            (28, include_bytes!("../../assets/mam.csv").as_slice()),
-            (36, include_bytes!("../../assets/oui36.csv").as_slice()),
-        ] {
-            let mut reader = csv::Reader::from_reader(data);
-            for record in reader.records().flatten() {
-                if let (Some(prefix), Some(name)) = (record.get(1), record.get(2))
-                    && let Ok(prefix) = u64::from_str_radix(prefix, 16)
-                {
-                    table.insert((bits, prefix), name.to_owned());
-                }
-            }
-        }
-        table
+        decode_vendors(include_bytes!(concat!(
+            env!("OUT_DIR"),
+            "/ieee-vendors.zlib"
+        )))
+        .expect("the build-time IEEE registry must be valid")
     })
+}
+
+fn decode_vendors(data: &[u8]) -> io::Result<HashMap<(u8, u64), String>> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid embedded IEEE registry");
+    let mut input = flate2::read::ZlibDecoder::new(data);
+    let mut header = [0u8; 12];
+    input.read_exact(&mut header)?;
+    if &header[..8] != b"IPSCIE01" {
+        return Err(invalid());
+    }
+    let count = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
+    if count > 1_000_000 {
+        return Err(invalid());
+    }
+    let mut table = HashMap::with_capacity(count);
+    for _ in 0..count {
+        let mut entry = [0u8; 13];
+        input.read_exact(&mut entry)?;
+        let bits = entry[0];
+        let prefix = u64::from_be_bytes(entry[1..9].try_into().unwrap());
+        let length = u32::from_be_bytes(entry[9..13].try_into().unwrap()) as usize;
+        if !matches!(bits, 24 | 28 | 36) || prefix >= 1u64 << bits || length > 16_384 {
+            return Err(invalid());
+        }
+        let mut name = vec![0; length];
+        input.read_exact(&mut name)?;
+        let name = String::from_utf8(name).map_err(|_| invalid())?;
+        if table.insert((bits, prefix), name).is_some() {
+            return Err(invalid());
+        }
+    }
+    // Consume the stream to validate its checksum and reject extra decoded records.
+    if input.read(&mut [0])? != 0 {
+        return Err(invalid());
+    }
+    Ok(table)
 }
 
 pub(super) fn vendor(mac: [u8; 6]) -> Option<&'static str> {
@@ -152,5 +183,74 @@ pub(super) fn probable_brand(mac: [u8; 6], hostname: &str) -> String {
         Some(brand) => format!("{brand} (hostname hint, unverified)"),
         None if mac[0] & 2 != 0 => "Unknown (randomized/local MAC)".into(),
         None => "Unknown (MAC assignment not listed)".into(),
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn compact_registry_matches_every_original_ieee_entry() {
+        // Recreate the previous reader independently, including its duplicate handling.
+        let mut original = HashMap::new();
+        let mut counts = Vec::new();
+        for (bits, data) in [
+            (24, include_bytes!("../../assets/oui.csv").as_slice()),
+            (28, include_bytes!("../../assets/mam.csv").as_slice()),
+            (36, include_bytes!("../../assets/oui36.csv").as_slice()),
+        ] {
+            let mut rows = 0;
+            for record in csv::Reader::from_reader(data).records() {
+                let record = record.unwrap();
+                let prefix = u64::from_str_radix(&record[1], 16).unwrap();
+                original.insert((bits, prefix), record[2].to_owned());
+                rows += 1;
+            }
+            counts.push((bits, rows));
+        }
+        assert_eq!(
+            vendors(),
+            &original,
+            "no prefix, Unicode character or organization name may change"
+        );
+        assert!(counts.iter().all(|&(_, rows)| rows > 1000));
+        println!(
+            "IEEE lossless comparison: {} unique entries; source rows by prefix: {counts:?}",
+            original.len()
+        );
+
+        // For every assignment, check both ends of its MAC range against the old lookup,
+        // including overlaps where a more specific 28-/36-bit assignment takes priority.
+        for &(bits, prefix) in original.keys() {
+            let first = prefix << (48 - bits);
+            let last = first | ((1u64 << (48 - bits)) - 1);
+            for value in [first, last] {
+                let mac: [u8; 6] = value.to_be_bytes()[2..].try_into().unwrap();
+                assert_eq!(lookup_vendor(mac, vendors()), lookup_vendor(mac, &original));
+            }
+        }
+    }
+
+    #[test]
+    fn compact_registry_rejects_incomplete_or_invalid_records() {
+        fn compressed(bytes: &[u8]) -> Vec<u8> {
+            use std::io::Write;
+            let mut output =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            output.write_all(bytes).unwrap();
+            output.finish().unwrap()
+        }
+        let data = include_bytes!(concat!(env!("OUT_DIR"), "/ieee-vendors.zlib"));
+        assert!(decode_vendors(&data[..data.len() / 2]).is_err());
+        assert!(decode_vendors(&compressed(b"wrong format")).is_err());
+        let mut unfinished = b"IPSCIE01".to_vec();
+        unfinished.extend_from_slice(&1u32.to_be_bytes());
+        assert!(decode_vendors(&compressed(&unfinished)).is_err());
+        let mut empty = b"IPSCIE01".to_vec();
+        empty.extend_from_slice(&0u32.to_be_bytes());
+        assert!(decode_vendors(&compressed(&empty)).unwrap().is_empty());
+        empty.push(0);
+        assert!(decode_vendors(&compressed(&empty)).is_err());
     }
 }

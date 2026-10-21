@@ -1,0 +1,248 @@
+# English source<TAB>French translation. English is the built-in fallback.
+# Indexed placeholders are substituted once; never translate observed network data.
+NETWORK SCANNER	SCANNER RÉSEAU
+About IP Scout	À propos d’IP Scout
+Switch theme	Changer de thème
+Scan settings	Paramètres
+Tools	Outils
+Targets, profiles and scan history	Cibles, profils et historique des scans
+Fetchers	Collecteurs
+Select and arrange fetchers	Choisir et organiser les collecteurs
+Targets	Cibles
+Local	Local
+No local networks found	Aucun réseau local détecté
+Refresh	Actualiser
+Stop	Arrêter
+Stopping scan...	Arrêt du scan…
+Start scan	Lancer le scan
+TCP ports	Ports TCP
+Custom	Personnalisé
+Common	Courants
+Web	Web
+Windows	Windows
+No TCP	Sans TCP
+All TCP	Tous les ports TCP
+Inventory	Inventaire
+All 65,535 TCP ports per address. Large ranges can take minutes or longer; concurrent connections remain bounded.	Les 65 535 ports TCP de chaque adresse. Les grandes plages peuvent prendre plusieurs minutes ou davantage ; le nombre de connexions simultanées reste limité.
+Custom...	Personnaliser…
+Edit TCP ports	Modifier les ports TCP
+Auto max	Max. auto
+Workers	Tâches
+Local host budget: {0} / {1} | Routed TCP budget: {2} / {3} | {4} independent interface/next-hop paths | Slowest path pacing: up to 8 starts every {5} ms	Budget local : {0} / {1} | Budget TCP routé : {2} / {3} | {4} chemins interface/passerelle indépendants | Cadence du chemin le plus lent : jusqu’à 8 démarrages toutes les {5} ms
+Worker ceiling; routed traffic has separate connection and pacing limits.	Plafond des tâches ; le trafic routé possède ses propres limites de connexion et de cadence.
+Deep	Approfondi
+Probe silent addresses for extra services; longer timeouts and discovery window.	Rechercher des services supplémentaires sur les adresses silencieuses ; délais et fenêtre de découverte plus longs.
+Fast	Rapide
+Enrich responding devices; bounded ARP waits and higher TCP concurrency. Slower devices may need Deep.	Enrichir les appareils qui répondent ; attente ARP limitée et davantage de connexions TCP simultanées. Les appareils plus lents peuvent nécessiter le mode Approfondi.
+Optional UDP ports and DNS/NTP/SNMP fetchers. Timeouts mean open or filtered, not closed.	Ports UDP et collecteurs DNS/NTP/SNMP facultatifs. Une absence de réponse signifie ouvert ou filtré, pas fermé.
+Ports	Ports
+All UDP	Tous les ports UDP
+Services	Services
+All UDP ports; usually much slower and less conclusive. Deep mode allows one retry.	Tous les ports UDP ; généralement bien plus lent et moins concluant. Le mode Approfondi autorise une nouvelle tentative.
+Only selected DNS/NTP/SNMP service fetchers; no additional port list.	Uniquement les collecteurs DNS/NTP/SNMP sélectionnés ; aucune liste de ports supplémentaire.
+Edit UDP ports	Modifier les ports UDP
+SCANNED	ANALYSÉES
+ALIVE	ACTIFS
+WITH OPEN PORTS	PORTS OUVERTS
+ELAPSED	DURÉE
+{0} shown  /  {1} results	{0} affichés  /  {1} résultats
+Host details	Détails de l’appareil
+Close details	Fermer les détails
+Host discovery	Découverte de l’appareil
+Complete	Terminée
+Incomplete	Incomplet
+Hostname	Nom d’hôte
+Ping	Ping
+MAC address	Adresse MAC
+Manufacturer	Fabricant
+Probable brand	Marque probable
+ARP response	Réponse ARP
+Yes	Oui
+Not confirmed	Non confirmée
+Not tested / no response	Non testé / aucune réponse
+Open TCP ports	Ports TCP ouverts
+Refused TCP ports	Ports TCP refusés
+ICMP replies / samples	Réponses / essais ICMP
+Notes	Notes
+Copy host details	Copier les détails de l’appareil
+Open host web page	Ouvrir la page web de l’appareil
+All hosts	Tous les appareils
+Alive	Actif
+Open ports	Ports ouverts
+No response	Aucune réponse
+Filter hosts	Filtrer les appareils
+Copy visible IP addresses	Copier les adresses IP affichées
+Copy visible MAC addresses (skip missing values)	Copier les adresses MAC affichées (ignorer les valeurs absentes)
+Copied {0} {1} addresses	{0} adresses {1} copiées
+Export visible results to CSV	Exporter les résultats affichés en CSV
+Clear scan results	Effacer les résultats du scan
+Ready	Prêt
+Dismiss error	Masquer l’erreur
+No scan results	Aucun résultat de scan
+Scanning...	Scan en cours…
+No matching hosts	Aucun appareil correspondant
+IP address	Adresse IP
+Status	État
+Copy IP address	Copier l’adresse IP
+Copy MAC address	Copier l’adresse MAC
+Rescan selected devices	Relancer le scan des appareils sélectionnés
+Selected fetchers	Collecteurs sélectionnés
+Move selected fetcher up	Monter le collecteur sélectionné
+Move selected fetcher down	Descendre le collecteur sélectionné
+Add available fetcher	Ajouter le collecteur disponible
+Remove selected fetcher	Retirer le collecteur sélectionné
+Available fetchers	Collecteurs disponibles
+Defaults	Par défaut
+Select inventory fetchers; keeps the current TCP port list. The Inventory TCP preset includes common device services.	Sélectionner les collecteurs d’inventaire ; conserver les ports TCP actuels. Le préréglage TCP Inventaire inclut les services courants des appareils.
+Cancel	Annuler
+Apply	Appliquer
+Custom {0} ports	Ports {0} personnalisés
+No {0} ports	Aucun port {0}
+{0} {1} ports	{0} ports {1}
+Probe timeout	Délai des sondes
+Max workers	Tâches simultanées max.
+Scan adaptation	Adaptation du scan
+Adaptive	Adaptative
+Adjusts workers and routed TCP/ICMP pacing independently for each interface/next hop. Learns per-host deadlines from latency and jitter: 50 ms minimum on LAN, 100 ms routed, up to 4× the initial timeout (maximum 5 seconds). Unmeasured hosts keep the initial timeout.	Adapte les tâches et la cadence TCP/ICMP routée pour chaque interface/passerelle. Ajuste les délais selon la latence et sa variation : au moins 50 ms en local, 100 ms en routé, jusqu’à 4 fois le délai initial (5 secondes maximum). Les appareils sans mesure conservent le délai initial.
+ICMP samples	Essais ICMP
+Used only with Packet loss selected. Other scans send one ping per host.	Utilisé uniquement si Pertes de paquets est sélectionné. Les autres scans envoient un ping par appareil.
+Configure	Configurer
+Discovery window	Fenêtre de découverte
+Shared local discovery time per scan, only when selected. MNDP advertisements are periodic; allow 30-120 seconds when needed. UPnP descriptions add at most two seconds.	Durée de découverte locale partagée par scan, uniquement si sélectionnée. Les annonces MNDP sont périodiques ; prévoir 30 à 120 secondes si nécessaire. Les descriptions UPnP ajoutent au plus deux secondes.
+HTTPS web probes	Sondes web HTTPS
+Allow unverified TLS	Autoriser le TLS non vérifié
+Off by default. Enables detection on self-signed HTTPS services; these results are labeled TLS unverified.	Désactivé par défaut. Permet de détecter les services HTTPS autosignés ; leurs résultats portent la mention TLS non vérifié.
+Local discovery	Découverte locale
+Confirm ARP-only devices	Confirmer les appareils ARP seuls
+SNMPv2c community	Communauté SNMPv2c
+Optional and not saved. Sent unencrypted for read-only SNMPv2c GET when SNMP info or UDP 161 is selected. No default guessing or writes.	Facultative et non enregistrée. Envoyée sans chiffrement pour une lecture SNMPv2c GET si Infos SNMP ou UDP 161 est sélectionné. Aucune tentative de communauté par défaut ni écriture.
+Version {0}	Version {0}
+License: {0}	Licence : {0}
+An independent scanner inspired by Angry IP Scanner.	Un scanner indépendant inspiré d’Angry IP Scanner.
+Manufacturer data: IEEE Registration Authority	Données fabricants : IEEE Registration Authority
+Interface language	Langue de l’interface
+Automatic (system)	Automatique (système)
+Follows the system display language. Unsupported languages use English.	Suit la langue d’affichage du système. Les langues non prises en charge utilisent l’anglais.
+Language changes apply immediately. Exports and scan history keep their original format.	Le changement de langue est immédiat. Les exports et l’historique conservent leur format d’origine.
+Scan tools	Outils de scan
+Profiles	Profils
+History	Historique
+Working with file…	Traitement du fichier…
+Paste addresses, ranges or subnets. Use commas, spaces or one target per line. Prefix exclusions with !.	Collez des adresses, plages ou sous-réseaux. Séparez-les par des virgules, des espaces ou des sauts de ligne. Préfixez les exclusions par !.
+{0} unique addresses in {1} ranges	{0} adresses uniques dans {1} plages
+Import target file…	Importer un fichier de cibles…
+Import target list	Importer une liste de cibles
+Text targets	Cibles au format texte
+Apply targets	Appliquer les cibles
+{0} selected devices. Ctrl-click rows to select several.	{0} appareils sélectionnés. Ctrl+clic sur les lignes pour en sélectionner plusieurs.
+Scan selected	Scanner la sélection
+Scan visible results	Scanner les résultats affichés
+Retry inconclusive	Réessayer les résultats non concluants
+Profiles save targets, ports, fetchers and scan settings. SNMP communities are excluded.	Les profils enregistrent les cibles, ports, collecteurs et paramètres de scan. Les communautés SNMP sont exclues.
+Profile name	Nom du profil
+Save current	Enregistrer le profil actuel
+Load	Charger
+Delete	Supprimer
+Profile loaded; ready to scan	Profil chargé ; prêt à scanner
+Save full scan records, including coverage. Reload them or compare against a previous scan.	Enregistrez les scans complets, y compris leur couverture. Rechargez-les ou comparez-les à un scan précédent.
+Save scan…	Enregistrer le scan…
+Load scan…	Charger un scan…
+Load baseline…	Charger une référence…
+Current as baseline	Utiliser le scan actuel comme référence
+Baseline: {0} · {1} rows · {2}	Référence : {0} · {1} lignes · {2}
+complete	complet
+partial	partiel
+Compare current scan	Comparer le scan actuel
+{0} changed or uncertain devices	{0} appareils modifiés ou incertains
+Previous	Précédent
+Page {0} of {1}	Page {0} sur {1}
+Next	Suivant
+No response is inconclusive. Changed target scopes, probe selections and unfinished work can limit comparisons.	Une absence de réponse n’est pas concluante. Des changements de cibles, de sondes ou un scan inachevé peuvent limiter les comparaisons.
+NetBIOS info	Infos NetBIOS
+Web detect	Détection web
+Packet loss	Pertes de paquets
+HTTP status	État HTTP
+Web URL	URL web
+WSD info	Infos WSD
+Ubiquiti discovery	Découverte Ubiquiti
+Unavailable	Indisponible
+LLMNR hostname	Nom d’hôte LLMNR
+Service banners	Bannières des services
+TLS certificates	Certificats TLS
+Web page title	Titre de la page web
+Device identity	Identité de l’appareil
+Open UDP ports	Ports UDP ouverts
+UDP scan status	État du scan UDP
+DNS service	Service DNS
+NTP service	Service NTP
+SNMP info	Infos SNMP
+Service details	Détails des services
+Network path	Chemin réseau
+TTL observed in an ICMP echo reply; blank when ping does not respond.	TTL observé dans une réponse ICMP ; vide en l’absence de réponse au ping.
+Unicast UDP 137 node status: computer names, groups and services. Many devices disable NetBIOS.	État du nœud via UDP 137 unicast : noms, groupes et services. NetBIOS est désactivé sur de nombreux appareils.
+Independently checks HTTP and HTTPS on common web ports, including 8080, and up to 26 additional open TCP ports. Reported Server headers are not verified.	Vérifie HTTP et HTTPS séparément sur les ports web courants, dont 8080, et jusqu’à 26 autres ports TCP ouverts. Les en-têtes Server déclarés ne sont pas vérifiés.
+Lost ICMP replies as a percentage of samples. Set the sample count in Scan settings; extra samples take longer.	Réponses ICMP perdues en pourcentage des essais. Réglez le nombre d’essais dans les paramètres ; davantage d’essais allonge le scan.
+HTTP response code, including redirects and authentication errors. Redirects are not followed.	Code de réponse HTTP, y compris les redirections et erreurs d’authentification. Les redirections ne sont pas suivies.
+Detected HTTP/HTTPS endpoints, including custom ports.	Points d’accès HTTP/HTTPS détectés, y compris sur les ports personnalisés.
+Local multicast DNS-SD service names, .local hostnames, ports and selected TXT properties. Advertisements do not confirm host reachability.	Services DNS-SD locaux en multicast : noms, hôtes .local, ports et certaines propriétés TXT. Les annonces ne confirment pas que l’appareil est joignable.
+Local WS-Discovery device types, scopes and endpoints. No metadata URLs are fetched. Multicast can be blocked by firewalls or Wi-Fi isolation.	Types, portées et points d’accès WS-Discovery locaux. Aucune URL de métadonnées n’est consultée. Un pare-feu ou l’isolation Wi-Fi peut bloquer le multicast.
+Local SSDP discovery and bounded UPnP descriptions: name, manufacturer, model and reported server. Only same-device literal IPv4 URLs are fetched; no redirects or credentials.	Découverte SSDP locale et descriptions UPnP limitées : nom, fabricant, modèle et serveur déclaré. Seules les URL IPv4 explicites du même appareil sont consultées ; sans redirection ni identifiants.
+Passive UDP 5678 MikroTik advertisements: identity, board, firmware, interface and reported MAC. Longer discovery windows may be needed.	Annonces MikroTik passives sur UDP 5678 : identité, carte, micrologiciel, interface et MAC déclarée. Une fenêtre de découverte plus longue peut être nécessaire.
+Read-only UDP 10001 v1/v2 local discovery: reported name, model, firmware and MAC. No adoption or configuration commands.	Découverte locale v1/v2 en lecture seule sur UDP 10001 : nom, modèle, micrologiciel et MAC déclarés. Aucune commande d’adoption ni de configuration.
+Unicast TCP 5355 reverse-name query on directly connected IPv4 networks, with TTL 1. Many devices disable LLMNR. No multicast enumeration, authentication or network setting changes.	Recherche inverse unicast sur TCP 5355 pour les réseaux IPv4 directement connectés, avec TTL 1. LLMNR est souvent désactivé. Aucune énumération multicast, authentification ni modification réseau.
+Identify protocols from greeting bytes or bounded read-only SMB, RTSP and Redis probes; includes response evidence and labels unverified server claims.	Identifie les protocoles à partir des messages d’accueil ou de sondes SMB, RTSP et Redis limitées en lecture seule ; inclut les réponses observées et signale les déclarations serveur non vérifiées.
+The Windows-selected interface, source address and next hop. Routed traffic adapts separately for each interface/next-hop path.	Interface, adresse source et passerelle choisies par Windows. Le trafic routé s’adapte séparément pour chaque chemin interface/passerelle.
+Reads server greetings on open FTP, SSH, SMTP, POP3, IMAP, VNC and eligible custom ports. Up to 16 ports; no commands or credentials. Known printer and binary protocol ports are excluded. Reported software is unverified.	Lit les messages d’accueil FTP, SSH, SMTP, POP3, IMAP et VNC sur les ports ouverts et les ports personnalisés compatibles. Jusqu’à 16 ports ; sans commande ni identifiants. Exclut les ports connus d’imprimantes et de protocoles binaires. Les logiciels déclarés ne sont pas vérifiés.
+Reads public TLS certificate subject, issuer, SAN names, validity and serial on common TLS ports and detected HTTPS endpoints. Handshake is deliberately aborted; identity is unverified.	Lit le sujet, l’émetteur, les noms SAN, la validité et le numéro de série des certificats TLS publics. La négociation est volontairement interrompue ; l’identité n’est pas vérifiée.
+Reads up to 16 KiB of HTML from the root page on HTTP and HTTPS endpoints. No scripts, authentication, links or redirects. Self-signed HTTPS page titles require the existing unverified-TLS setting.	Lit jusqu’à 16 Kio de HTML sur la page racine HTTP/HTTPS. Sans script, authentification, lien ni redirection. Les titres HTTPS autosignés nécessitent l’option TLS non vérifié.
+Source-labeled names and models from the selected fetchers. Advertisements, titles and certificate names are hints, not verified device identity. Does not replace the resolved Hostname.	Noms et modèles issus des collecteurs sélectionnés, avec leur source. Les annonces, titres et noms de certificats sont des indices, pas une identité vérifiée. Ne remplace pas le nom d’hôte résolu.
+Confirmed UDP responses on selected ports. DNS/NTP use protocol requests; other ports use an empty datagram. No response is not proof of a closed port.	Réponses UDP confirmées sur les ports sélectionnés. DNS/NTP utilisent leurs requêtes protocolaires ; les autres ports reçoivent un datagramme vide. Une absence de réponse ne prouve pas qu’un port est fermé.
+Checked/selected counts, confirmed responses, OS-reported closed ports, open-or-filtered timeouts, and local errors. Pending work is labeled incomplete. Protocol adapters may not expose ICMP errors.	Nombres de ports vérifiés/sélectionnés, réponses confirmées, ports fermés signalés par le système, délais ouverts ou filtrés et erreurs locales. Le travail en attente est signalé incomplet. Certains adaptateurs n’exposent pas les erreurs ICMP.
+Read-only, non-recursive root SOA query to UDP 53. Shows response code, advertised recursion and SOA server. Request ID and question are validated; no external DNS recursion.	Requête SOA racine sans récursion en lecture seule sur UDP 53. Affiche le code de réponse, la récursion annoncée et le serveur SOA. Identifiant et question validés ; aucune récursion DNS externe.
+SNTPv4 time request on UDP 123. Shows stratum, server Unix time, clock offset and round-trip time. Does not change the computer clock; no NTP control or monitoring requests.	Requête horaire SNTPv4 sur UDP 123. Affiche la strate, l’heure Unix du serveur, le décalage et l’aller-retour. Ne modifie pas l’horloge ; aucune requête de contrôle ni de supervision NTP.
+Read-only SNMPv2c GET on UDP 161 for sysDescr, sysObjectID, sysUpTime and sysName. Requires an entered community in Scan settings; no guessing, SET, walks, traps or SNMPv3. Community is not saved and is sent unencrypted.	Lecture SNMPv2c GET sur UDP 161 de sysDescr, sysObjectID, sysUpTime et sysName. Nécessite une communauté saisie dans les paramètres ; sans devinette, SET, parcours, trap ni SNMPv3. Communauté non enregistrée et envoyée sans chiffrement.
+Copied	Copié
+Scanning {0}	Scan de {0} en cours
+Scan complete	Scan terminé
+Scan interrupted	Scan interrompu
+The scan ended unexpectedly	Le scan s’est terminé de façon inattendue
+Export did not finish	L’export n’a pas abouti
+Scan stopped: {0}/{1} checked, {2} unchecked; fetchers may be incomplete	Scan arrêté : {0}/{1} vérifiées, {2} non vérifiées ; les collectes peuvent être incomplètes
+Rechecking {0} of {1} addresses without an echo reply (paced confirmation)	Nouvelle vérification de {0} adresses sur {1} sans réponse ICMP (confirmation cadencée)
+Export partial scan results	Exporter les résultats partiels du scan
+Export visible scan results	Exporter les résultats affichés du scan
+Exported {0} hosts to {1}	{0} appareils exportés vers {1}
+Could not export: {0}	Échec de l’export : {0}
+Save scan snapshot	Enregistrer un scan
+Scan snapshot	Scan enregistré
+Load scan snapshot	Charger un scan enregistré
+Choose comparison baseline	Choisir le scan de référence
+Saved scan to {0}	Scan enregistré dans {0}
+Loaded {0} ({1} rows{2})	{0} chargé ({1} lignes{2})
+, partial	, partiel
+Run or load a scan before saving it	Lancez ou chargez un scan avant de l’enregistrer
+Stop the active scan before loading another scan	Arrêtez le scan en cours avant d’en charger un autre
+The file operation ended unexpectedly	L’opération sur le fichier s’est terminée de façon inattendue
+New response	Nouvelle réponse
+Lost response	Réponse perdue
+Changed	Modifié
+Uncertain	Incertain
+Error: {0}	Erreur : {0}
+UDP ports	Ports UDP
+Loaded {0} ({1} rows)	{0} chargé ({1} lignes)
+Loaded {0} ({1} rows, partial)	{0} chargé ({1} lignes, scan partiel)
+{0} Fetchers	{0} Collecteurs
+{0} Local	{0} Local
+{0} Refresh	{0} Actualiser
+{0} Stop	{0} Arrêter
+{0} Start scan	{0} Lancer le scan
+{0} Custom...	{0} Personnaliser…
+{0} Copy IP address	{0} Copier l’adresse IP
+{0} Copy MAC address	{0} Copier l’adresse MAC
+{0} Copy host details	{0} Copier les détails de l’appareil
+{0} Defaults	{0} Par défaut
+{0} Inventory	{0} Inventaire
+{0} Apply	{0} Appliquer
+{0} Configure	{0} Configurer
+Initial Linux support: ARP/MAC discovery and per-interface route inspection are not yet available.	Prise en charge Linux initiale : la découverte ARP/MAC et l’inspection des routes par interface ne sont pas encore disponibles.
+Some selected fetchers are unavailable on this platform; existing historical values remain readable.	Certains collecteurs sélectionnés ne sont pas disponibles sur cette plateforme ; les valeurs des historiques restent lisibles.

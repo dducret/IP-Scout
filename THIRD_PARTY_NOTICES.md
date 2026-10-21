@@ -13,8 +13,14 @@ The registries are used for offline mapping of globally assigned 24-, 28- and 36
 prefixes to registered organization names. It does not identify the maker of
 randomized or locally administered addresses.
 
+Release builds derive a losslessly compressed binary lookup table from these
+snapshots. It preserves all assignment prefixes and organization names; unused
+registry and organization-address columns are not embedded. The original CSVs
+remain in the source tree, and the IEEE attribution still applies to the derived
+data. No updated registry is downloaded during a build or lookup.
+
 The application uses eframe/egui, egui_extras, egui-phosphor, Hickory DNS, serde,
-csv, rfd, windows-sys, Tokio, tokio-util, futures-util, reqwest, netbios-parser,
+csv, flate2, rfd, windows-sys, Tokio, tokio-util, futures-util, reqwest, netbios-parser,
 rustls, mdns-sd, quick-xml, socket2, uuid, and their transitive dependencies. Their respective license
 metadata is available in Cargo's registry source and `Cargo.lock` identifies the
 versions used. Phosphor Icons are MIT licensed.
@@ -103,6 +109,10 @@ SOFTWARE.
 
 IP Scout uses original protocol code and the libraries listed above;
 the application source remains MIT. No external packet-capture driver is needed.
+
+The Linux backend additionally uses if-addrs (MIT OR BSD-3-Clause) for local
+interface enumeration and libc (MIT OR Apache-2.0) for native ICMP ancillary data.
+Linux file dialogs use rfd's XDG portal backend and its transitive dependencies.
 
 IP Scout is not affiliated with or endorsed by Angry IP Scanner.
 

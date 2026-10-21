@@ -1,0 +1,115 @@
+name: Windows and Linux builds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builds-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build and headless graphics dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev libgl1-mesa-dev xvfb xauth dbus-x11
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint all targets
+        run: cargo clippy --locked --all-targets --features gui-smoke -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Verify Linux UI with software OpenGL
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          WINIT_UNIX_BACKEND: x11
+        run: |
+          cargo build --locked --example gui_smoke --features gui-smoke
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x1024x24' env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET target/debug/examples/gui_smoke --language-only
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        run: bash scripts/package-linux.sh
+
+      - name: Upload Windows build
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: IP-Scout-Windows-x64
+          path: |
+            dist/*-Windows-x64.zip
+            dist/*-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Linux build
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: IP-Scout-Linux-x64
+          path: |
+            dist/*-Linux-x64.tar.gz
+            dist/*-Linux-x64-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Linux screenshots
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Linux-UI-screenshots
+          path: artifacts/i18n-*.png
+          if-no-files-found: ignore
+          retention-days: 7

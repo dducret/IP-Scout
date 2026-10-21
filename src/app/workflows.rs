@@ -17,7 +17,7 @@ enum WorkflowOutcome {
     Targets(String),
     Loaded(Box<ScanSnapshot>),
     Baseline(Box<ScanSnapshot>),
-    Saved(String),
+    Saved(Message),
     Compared(Vec<HostChange>),
     Cancelled,
 }
@@ -200,6 +200,7 @@ impl ScoutApp {
     }
 
     fn history_job(&mut self, ctx: &egui::Context, action: usize) {
+        let tr = self.language.resolve();
         if action == 0 {
             let Some(snapshot) = self.current_snapshot() else {
                 self.error = Some("Run or load a scan before saving it".into());
@@ -207,28 +208,28 @@ impl ScoutApp {
             };
             self.start_workflow_job(ctx, move || {
                 let Some(path) = rfd::FileDialog::new()
-                    .set_title("Save scan snapshot")
-                    .add_filter("Scan snapshot", &["json"])
+                    .set_title(tr.text("Save scan snapshot"))
+                    .add_filter(tr.text("Scan snapshot"), &["json"])
                     .set_file_name("ip-scout-scan.json")
                     .save_file()
                 else {
                     return Ok(WorkflowOutcome::Cancelled);
                 };
                 snapshot.save(&path)?;
-                Ok(WorkflowOutcome::Saved(format!(
-                    "Saved scan to {}",
-                    path.display()
+                Ok(WorkflowOutcome::Saved(Message::new(
+                    "Saved scan to {0}",
+                    vec![path.display().to_string()],
                 )))
             });
         } else {
             self.start_workflow_job(ctx, move || {
                 let Some(path) = rfd::FileDialog::new()
                     .set_title(if action == 1 {
-                        "Load scan snapshot"
+                        tr.text("Load scan snapshot")
                     } else {
-                        "Choose comparison baseline"
+                        tr.text("Choose comparison baseline")
                     })
-                    .add_filter("Scan snapshot", &["json"])
+                    .add_filter(tr.text("Scan snapshot"), &["json"])
                     .pick_file()
                 else {
                     return Ok(WorkflowOutcome::Cancelled);
@@ -334,11 +335,13 @@ impl ScoutApp {
         self.dirty = true;
         self.selected = None;
         self.workflow.selected.clear();
-        self.message = format!(
-            "Loaded {} ({} rows{})",
-            snapshot.label,
-            self.hosts.len(),
-            if self.scan_complete { "" } else { ", partial" }
+        self.message = Message::new(
+            if self.scan_complete {
+                "Loaded {0} ({1} rows)"
+            } else {
+                "Loaded {0} ({1} rows, partial)"
+            },
+            vec![snapshot.label.clone(), self.hosts.len().to_string()],
         );
         self.workflow.scan_meta = Some(snapshot);
         self.workflow.changes.clear();
@@ -348,16 +351,22 @@ impl ScoutApp {
     }
 
     pub(super) fn workflow_window(&mut self, ctx: &egui::Context) {
+        let tr = self.language.resolve();
         if !self.workflow.open {
             return;
         }
         let mut open = true;
-        egui::Window::new("Scan tools")
+        egui::Window::new(tr.text("Scan tools"))
+            .id(egui::Id::new("scan_tools"))
             .open(&mut open)
             .default_width(610.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    for (tab, label) in ["Targets", "Profiles", "History"].iter().enumerate() {
+                    for (tab, label) in
+                        [tr.text("Targets"), tr.text("Profiles"), tr.text("History")]
+                            .iter()
+                            .enumerate()
+                    {
                         ui.selectable_value(&mut self.workflow.tab, tab, *label);
                     }
                 });
@@ -372,7 +381,7 @@ impl ScoutApp {
                 if self.workflow.busy() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Working with file…");
+                        ui.label(tr.text("Working with file…"));
                     });
                 }
             });
@@ -380,7 +389,8 @@ impl ScoutApp {
     }
 
     fn targets_tools(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.label("Paste addresses, ranges or subnets. Use commas, spaces or one target per line. Prefix exclusions with !.");
+        let tr = self.language.resolve();
+        ui.label(tr.text("Paste addresses, ranges or subnets. Use commas, spaces or one target per line. Prefix exclusions with !."));
         ui.add_enabled(
             self.scan.is_none(),
             egui::TextEdit::multiline(&mut self.workflow.target_draft)
@@ -392,28 +402,30 @@ impl ScoutApp {
         let targets = TargetSet::parse(&self.workflow.target_draft);
         match &targets {
             Ok(targets) => {
-                ui.label(format!(
-                    "{} unique addresses in {} ranges",
-                    targets.len(),
-                    targets.ranges().len()
+                ui.label(tr.format(
+                    "{0} unique addresses in {1} ranges",
+                    &[
+                        format!("{}", targets.len()),
+                        format!("{}", targets.ranges().len()),
+                    ],
                 ));
             }
             Err(error) => {
-                ui.colored_label(RED, error);
+                ui.colored_label(RED, tr.error(error));
             }
         }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
                     self.scan.is_none() && !self.workflow.busy(),
-                    egui::Button::new("Import target file…"),
+                    egui::Button::new(tr.text("Import target file…")),
                 )
                 .clicked()
             {
-                self.start_workflow_job(ctx, || {
+                self.start_workflow_job(ctx, move || {
                     let Some(path) = rfd::FileDialog::new()
-                        .set_title("Import target list")
-                        .add_filter("Text targets", &["txt", "csv", "list"])
+                        .set_title(tr.text("Import target list"))
+                        .add_filter(tr.text("Text targets"), &["txt", "csv", "list"])
                         .pick_file()
                     else {
                         return Ok(WorkflowOutcome::Cancelled);
@@ -424,7 +436,7 @@ impl ScoutApp {
             if ui
                 .add_enabled(
                     self.scan.is_none() && targets.is_ok(),
-                    egui::Button::new("Apply targets"),
+                    egui::Button::new(tr.text("Apply targets")),
                 )
                 .clicked()
             {
@@ -434,7 +446,7 @@ impl ScoutApp {
             if ui
                 .add_enabled(
                     self.scan.is_none() && targets.is_ok(),
-                    egui::Button::new("Start scan"),
+                    egui::Button::new(tr.text("Start scan")),
                 )
                 .clicked()
             {
@@ -444,15 +456,15 @@ impl ScoutApp {
             }
         });
         ui.separator();
-        ui.label(format!(
-            "{} selected devices. Ctrl-click rows to select several.",
-            self.workflow.selected.len()
+        ui.label(tr.format(
+            "{0} selected devices. Ctrl-click rows to select several.",
+            &[format!("{}", self.workflow.selected.len())],
         ));
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
                     self.scan.is_none() && !self.workflow.selected.is_empty(),
-                    egui::Button::new("Scan selected"),
+                    egui::Button::new(tr.text("Scan selected")),
                 )
                 .clicked()
             {
@@ -461,7 +473,7 @@ impl ScoutApp {
             if ui
                 .add_enabled(
                     self.scan.is_none() && !self.visible.is_empty(),
-                    egui::Button::new("Scan visible results"),
+                    egui::Button::new(tr.text("Scan visible results")),
                 )
                 .clicked()
             {
@@ -479,7 +491,7 @@ impl ScoutApp {
                         && self.hosts.iter().any(|host| {
                             host.status != HostStatus::Alive || !host.discovery_complete()
                         }),
-                    egui::Button::new("Retry inconclusive"),
+                    egui::Button::new(tr.text("Retry inconclusive")),
                 )
                 .clicked()
             {
@@ -498,12 +510,13 @@ impl ScoutApp {
     }
 
     fn profile_tools(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.label("Profiles save targets, ports, fetchers and scan settings. SNMP communities are excluded.");
+        let tr = self.language.resolve();
+        ui.label(tr.text("Profiles save targets, ports, fetchers and scan settings. SNMP communities are excluded."));
         ui.horizontal(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.workflow.profile_name)
                     .char_limit(64)
-                    .hint_text("Profile name"),
+                    .hint_text(tr.text("Profile name")),
             );
             if ui
                 .add_enabled(
@@ -514,7 +527,7 @@ impl ScoutApp {
                                 .profiles
                                 .iter()
                                 .any(|profile| profile.name == self.workflow.profile_name.trim())),
-                    egui::Button::new("Save current"),
+                    egui::Button::new(tr.text("Save current")),
                 )
                 .clicked()
             {
@@ -540,12 +553,12 @@ impl ScoutApp {
             ui.horizontal(|ui| {
                 ui.label(&profile.name);
                 if ui
-                    .add_enabled(self.scan.is_none(), egui::Button::new("Load"))
+                    .add_enabled(self.scan.is_none(), egui::Button::new(tr.text("Load")))
                     .clicked()
                 {
                     load = Some(index);
                 }
-                if ui.button("Delete").clicked() {
+                if ui.button(tr.text("Delete")).clicked() {
                     remove = Some(index);
                 }
             });
@@ -568,12 +581,13 @@ impl ScoutApp {
     }
 
     fn history_tools(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.label("Save full scan records, including coverage. Reload them or compare against a previous scan.");
+        let tr = self.language.resolve();
+        ui.label(tr.text("Save full scan records, including coverage. Reload them or compare against a previous scan."));
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
                     !self.workflow.busy() && self.workflow.scan_meta.is_some(),
-                    egui::Button::new("Save scan…"),
+                    egui::Button::new(tr.text("Save scan…")),
                 )
                 .clicked()
             {
@@ -582,14 +596,17 @@ impl ScoutApp {
             if ui
                 .add_enabled(
                     !self.workflow.busy() && self.scan.is_none(),
-                    egui::Button::new("Load scan…"),
+                    egui::Button::new(tr.text("Load scan…")),
                 )
                 .clicked()
             {
                 self.history_job(ctx, 1);
             }
             if ui
-                .add_enabled(!self.workflow.busy(), egui::Button::new("Load baseline…"))
+                .add_enabled(
+                    !self.workflow.busy(),
+                    egui::Button::new(tr.text("Load baseline…")),
+                )
                 .clicked()
             {
                 self.history_job(ctx, 2);
@@ -599,7 +616,7 @@ impl ScoutApp {
                     !self.workflow.busy()
                         && self.scan.is_none()
                         && self.workflow.scan_meta.is_some(),
-                    egui::Button::new("Current as baseline"),
+                    egui::Button::new(tr.text("Current as baseline")),
                 )
                 .clicked()
             {
@@ -609,16 +626,21 @@ impl ScoutApp {
             }
         });
         if let Some(baseline) = &self.workflow.baseline {
-            ui.label(format!(
-                "Baseline: {} · {} rows · {}",
-                baseline.label,
-                baseline.hosts.len(),
-                if baseline.complete && !baseline.cancelled {
-                    "complete"
-                } else {
-                    "partial"
-                }
-            ));
+            ui.label(
+                tr.format(
+                    "Baseline: {0} · {1} rows · {2}",
+                    &[
+                        baseline.label.to_string(),
+                        format!("{}", baseline.hosts.len()),
+                        (if baseline.complete && !baseline.cancelled {
+                            tr.text("complete")
+                        } else {
+                            tr.text("partial")
+                        })
+                        .to_string(),
+                    ],
+                ),
+            );
         }
         if ui
             .add_enabled(
@@ -626,7 +648,7 @@ impl ScoutApp {
                     && self.scan.is_none()
                     && self.workflow.baseline.is_some()
                     && self.workflow.scan_meta.is_some(),
-                egui::Button::new("Compare current scan"),
+                egui::Button::new(tr.text("Compare current scan")),
             )
             .clicked()
             && let (Some(baseline), Some(current)) =
@@ -640,29 +662,34 @@ impl ScoutApp {
             });
         }
         if self.workflow.compared {
-            ui.label(format!(
-                "{} changed or uncertain devices",
-                self.workflow.changes.len()
+            ui.label(tr.format(
+                "{0} changed or uncertain devices",
+                &[format!("{}", self.workflow.changes.len())],
             ));
             let page_count = self.workflow.changes.len().div_ceil(200);
             self.workflow.change_page = self.workflow.change_page.min(page_count.saturating_sub(1));
             if page_count > 1 {
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(self.workflow.change_page > 0, egui::Button::new("Previous"))
+                        .add_enabled(
+                            self.workflow.change_page > 0,
+                            egui::Button::new(tr.text("Previous")),
+                        )
                         .clicked()
                     {
                         self.workflow.change_page -= 1;
                     }
-                    ui.label(format!(
-                        "Page {} of {}",
-                        self.workflow.change_page + 1,
-                        page_count
+                    ui.label(tr.format(
+                        "Page {0} of {1}",
+                        &[
+                            format!("{}", self.workflow.change_page + 1),
+                            format!("{}", page_count),
+                        ],
                     ));
                     if ui
                         .add_enabled(
                             self.workflow.change_page + 1 < page_count,
-                            egui::Button::new("Next"),
+                            egui::Button::new(tr.text("Next")),
                         )
                         .clicked()
                     {
@@ -677,14 +704,17 @@ impl ScoutApp {
                 .skip(self.workflow.change_page * 200)
                 .take(200)
             {
-                ui.collapsing(format!("{} · {}", change.ip, change.kind.label()), |ui| {
-                    for detail in &change.details {
-                        ui.label(detail);
-                    }
-                });
+                ui.collapsing(
+                    format!("{} · {}", change.ip, tr.text(change.kind.label())),
+                    |ui| {
+                        for detail in &change.details {
+                            ui.label(detail);
+                        }
+                    },
+                );
             }
         }
-        ui.small("No response is inconclusive. Changed target scopes, probe selections and unfinished work can limit comparisons.");
+        ui.small(tr.text("No response is inconclusive. Changed target scopes, probe selections and unfinished work can limit comparisons."));
     }
 }
 
@@ -843,6 +873,132 @@ mod tests {
             254
         );
         assert!(restored.settings.snmp_community.is_empty());
+    }
+
+    #[derive(Default)]
+    struct MemoryStorage(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for MemoryStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn language_preference_is_saved_separately_and_old_preferences_default_to_auto() {
+        let ctx = egui::Context::default();
+        let mut storage = MemoryStorage::default();
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.storage = Some(&storage);
+        let mut app = ScoutApp::new(&cc);
+        assert_eq!(app.language, Language::Auto);
+        let profile = ScanProfile {
+            name: "Lab".into(),
+            settings: app.settings.clone(),
+        };
+        app.workflow.profiles.push(profile);
+        let profile_before = serde_json::to_vec(&app.workflow.profiles).unwrap();
+        for language in [Language::French, Language::English, Language::Auto] {
+            app.language = language;
+            eframe::App::save(&mut app, &mut storage);
+            assert_eq!(
+                serde_json::to_vec(&app.workflow.profiles).unwrap(),
+                profile_before
+            );
+            assert!(!storage.0["profiles"].contains("language"));
+            assert!(!storage.0["settings"].contains("language"));
+            let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+            cc.storage = Some(&storage);
+            assert_eq!(ScoutApp::new(&cc).language, language);
+        }
+    }
+
+    #[test]
+    fn rendering_french_does_not_change_csv_history_or_observed_names() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = ScoutApp::new(&cc);
+        let mut host = smoke_host("192.0.2.1", "02:11:22:33:44:55");
+        host.hostname = "Ready {0} – café".into();
+        host.vendor = "Incomplete".into();
+        host.notes = "No response".into();
+        let snapshot = ScanSnapshot {
+            schema_version: history::SCHEMA_VERSION,
+            recorded_unix_secs: 1234,
+            app_version: env!("CARGO_PKG_VERSION").into(),
+            label: "Lab {0}".into(),
+            target_text: "192.0.2.1".into(),
+            targets: TargetSet::parse("192.0.2.1").unwrap().ranges().to_vec(),
+            tcp_ports: vec![80],
+            udp_ports: Vec::new(),
+            fetchers: vec![
+                Fetcher::Hostname,
+                Fetcher::ArpResponse,
+                Fetcher::Manufacturer,
+            ],
+            probe_policy: "mode=Fast;arp=true".into(),
+            complete: true,
+            cancelled: false,
+            hosts: vec![host],
+            elapsed_ms: 12,
+        };
+        snapshot.validate().unwrap();
+        app.load_snapshot(snapshot);
+        fn export_bytes(app: &ScoutApp) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            export::write_csv_with_fetchers(
+                &mut bytes,
+                &app.hosts.iter().collect::<Vec<_>>(),
+                app.selected_fetchers(),
+            )
+            .unwrap();
+            bytes
+        }
+        let csv = export_bytes(&app);
+        let json = serde_json::to_vec(&app.current_snapshot().unwrap()).unwrap();
+        for language in [Language::French, Language::English, Language::French] {
+            app.language = language;
+            app.show_settings = true;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.controls(ctx);
+                    app.status_bar(ctx);
+                    app.results(ctx);
+                    app.windows(ctx);
+                },
+            );
+            assert_eq!(export_bytes(&app), csv);
+            assert_eq!(
+                serde_json::to_vec(&app.current_snapshot().unwrap()).unwrap(),
+                json
+            );
+            assert_eq!(
+                fetcher_display_value(language.resolve(), Fetcher::Hostname, &app.hosts[0]),
+                "Ready {0} – café"
+            );
+            assert_eq!(
+                fetcher_display_value(language.resolve(), Fetcher::Manufacturer, &app.hosts[0]),
+                "Incomplete"
+            );
+        }
+        let csv = String::from_utf8(csv).unwrap();
+        assert!(csv.starts_with("IP address,Status,Hostname,ARP response,Manufacturer\n"));
+        assert!(csv.contains(",Alive,Ready {0} – café,Yes,Incomplete"));
+        assert_eq!(
+            fetcher_display_value(Locale::French, Fetcher::ArpResponse, &app.hosts[0]),
+            "Oui"
+        );
     }
     #[test]
     fn csv_target_import_uses_only_address_column() {

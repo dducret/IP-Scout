@@ -1,6 +1,9 @@
 #[path = "../src/app.rs"]
 mod app;
 
+#[path = "support/language_smoke.rs"]
+mod language_smoke;
+
 use eframe::{App, egui};
 use std::{
     collections::HashSet,
@@ -301,6 +304,9 @@ impl App for SmokeApp {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|arg| arg == "--language-only") {
+        return language_smoke::run();
+    }
     std::fs::create_dir_all("artifacts").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     eframe::run_native(

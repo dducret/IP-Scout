@@ -10,9 +10,10 @@ fn main() -> eframe::Result {
                 .with_inner_size([1180.0, 760.0])
                 .with_min_inner_size([820.0, 540.0])
                 .with_icon(
-                    eframe::icon_data::from_png_bytes(include_bytes!(
-                        "../assets/ip-scout-logo.png"
-                    ))
+                    eframe::icon_data::from_png_bytes(include_bytes!(concat!(
+                        env!("OUT_DIR"),
+                        "/runtime-logo.png"
+                    )))
                     .expect("bundled IP Scout logo must be a valid PNG"),
                 ),
             centered: true,
